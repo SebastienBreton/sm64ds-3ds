@@ -27,11 +27,16 @@ struct EngineInput {
 EngineInput inputs[]={EngineInput(ntr::VramView::AObj,0x40000),
                       EngineInput(ntr::VramView::BObj,0x20000)};
 }
+// minigames-30fps-min: binary windows (scene wipes) are painted over the final
+// panel by the window cut; the OBJ layer itself is then drawn without them.
+static uint32_t binary_window_display(ntr::Engine engine,uint32_t display){
+    return (display&0xe000) && ntr::ppu_windows_binary(engine)?display&~0xe000u:display;
+}
 bool native_obj_admit(ntr::Engine engine){
     auto& state=inputs[engine==ntr::ENGINE_B?1:0];
     if(!ntr::io_ready()){state.admission=ObjFallback::MissingViews;return false;}
     const bool b=engine==ntr::ENGINE_B;
-    const auto display=static_cast<uint32_t>(ntr::io_read(b?0x04001000:0x04000000,4));
+    const auto display=binary_window_display(engine,static_cast<uint32_t>(ntr::io_read(b?0x04001000:0x04000000,4)));
     const auto* oam=static_cast<const uint8_t*>(ntr::host_ptr(b?0x07000400:0x07000000));
     state.admission=obj_admission(display,oam);
     return state.admission==ObjFallback::None;
@@ -50,7 +55,7 @@ static const ObjPlan* native_obj_prepare_impl(ntr::Engine engine){
     try{
     const bool b=engine==ntr::ENGINE_B;
     ObjInput input;
-    input.display=static_cast<uint32_t>(ntr::io_read(b?0x04001000:0x04000000,4));
+    input.display=binary_window_display(engine,static_cast<uint32_t>(ntr::io_read(b?0x04001000:0x04000000,4)));
     input.oam=static_cast<const uint8_t*>(ntr::host_ptr(b?0x07000400:0x07000000));
     input.palette=static_cast<const uint8_t*>(ntr::host_ptr(b?0x05000600:0x05000200));
     input.vram=state.view(ntr::io_vram_banks(),b?0x06600000:0x06400000);
@@ -69,7 +74,7 @@ bool native_obj_unchanged(ntr::Engine engine){
     static ObjPlan scratch[2];auto& plan=scratch[engine==ntr::ENGINE_B?1:0];
     const bool b=engine==ntr::ENGINE_B;
     ObjInput input;
-    input.display=static_cast<uint32_t>(ntr::io_read(b?0x04001000:0x04000000,4));
+    input.display=binary_window_display(engine,static_cast<uint32_t>(ntr::io_read(b?0x04001000:0x04000000,4)));
     input.oam=static_cast<const uint8_t*>(ntr::host_ptr(b?0x07000400:0x07000000));
     input.palette=static_cast<const uint8_t*>(ntr::host_ptr(b?0x05000600:0x05000200));
     input.vram=static_cast<const uint8_t*>(ntr::host_ptr(b?0x06600000:0x06400000));

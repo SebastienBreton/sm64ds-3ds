@@ -219,6 +219,9 @@ bool ppu_prepared_inputs_unchanged(Engine eng);
 // minigames-30fps-min: the binary window cut (or its absence) equals the one
 // last handed out with a candidate view of this engine.
 bool ppu_window_cut_unchanged(Engine eng);
+// minigames-30fps-min: the engine's windows are binary (see PpuWindowCut): the
+// GPU OBJ path may ignore them, the cut is painted over its final panel.
+bool ppu_windows_binary(Engine eng);
 // minigames-30fps-min: early preparation. While a presentation job reads the
 // candidate views it was given, pin their cache ways; a preparation of an
 // engine whose active way is pinned then writes the other way (allocated on

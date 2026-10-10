@@ -145,16 +145,16 @@ int current_env(){
 }
 
 // Toon variant of a lighting env (face-toy): same lighting, colour = table[red].
-int toon_env(int id){
-    static int from=-1,to=-1;static std::uint64_t owner=~0ull;static std::uint32_t version=0;
+int toon_env(int id,std::uint8_t mode=1){ // mode 1 toon, 2 highlight
+    static int from=-1,to=-1;static std::uint64_t owner=~0ull;static std::uint32_t version=0;static std::uint8_t last_mode=0;
     // g_toon_version changes whenever g_toon_table does (gx.cpp toon_latch), so
     // the per-vertex table memcmp is not needed (menu-regression).
-    if(owner==rec->generation && from==id && version==g_toon_version && to<int(rec->envs.size()))return to;
-    Env e=rec->envs[id];e.toon=1;std::memcpy(e.table,g_toon_table,sizeof e.table);
+    if(owner==rec->generation && from==id && version==g_toon_version && last_mode==mode && to<int(rec->envs.size()))return to;
+    Env e=rec->envs[id];e.toon=mode;std::memcpy(e.table,g_toon_table,sizeof e.table);
     const int n=int(rec->envs.size());int found=-1;
     for(int i=n-1;i>=0 && i>=n-8;--i)if(!std::memcmp(&rec->envs[i],&e,sizeof e)){found=i;break;}
     if(found<0){found=n;rec->envs.push_back(e);}
-    owner=rec->generation;from=id;to=found;version=g_toon_version;return found;
+    owner=rec->generation;from=id;to=found;version=g_toon_version;last_mode=mode;return found;
 }
 // NORMAL replacement. Texture coordinate mode 2 and the vector-matrix product
 // keep their exact integer CPU evaluation; the colour moves to the shader.
@@ -248,6 +248,9 @@ inline bool vertex(std::int16_t x,std::int16_t y,std::int16_t z){
     if(g_toon){ // DS toon shading: vertex colour -> ToonTable[red]
         if(out.lit)out.env=std::int16_t(toon_env(out.env));
         else{const std::uint16_t c=toon_bgr555(std::uint16_t(out.a));out.a=std::int16_t(c&31);out.b=std::int16_t((c>>5)&31);out.c=std::int16_t((c>>10)&31);}
+    }else if(g_highlight){ // DS highlight: grey (red) base; lit vertices get the additive table pass
+        if(out.lit)out.env=std::int16_t(toon_env(out.env,2));
+        else{out.b=out.a;out.c=out.a;}
     }
     if(g.texmode==3){const Attr saved=attr;texcoord_fixed(x,y,z,0,24,true);out.s=attr.s;out.t=attr.t;attr=saved;}
     assemble(id);

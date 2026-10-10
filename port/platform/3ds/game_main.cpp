@@ -132,6 +132,7 @@ extern "C" int __wrap_func_ov007_020b7090(unsigned short x,unsigned short y,unsi
  return result;
 }
 #define REQUIRE(c) do { if(!(c)){std::fprintf(stderr,"FATAL: game startup: %s\n",#c);return 1;} } while(0)
+extern "C" void sm64ds_fs_prefetch_scene(unsigned scene); // hal/fs.cpp: background prefetch order hint
 static void require_runtime(bool ok,const char* operation) {
  if(!ok){std::fprintf(stderr,"FATAL: game runtime: %s (scene=%u next=%u)\n",operation,current_scene,data_02092664);std::abort();}
 }
@@ -188,6 +189,7 @@ extern "C" int __wrap__ZN8dScene_c16SpawnIfNecessaryEv(){
   bmd_compiled_scene_reset(); // previous scene's compiled display lists never hit again
   ntr::gx_texture_cache_scene_trim(); // and its decoded textures
   current_scene=next;
+  sm64ds_fs_prefetch_scene(next);
   v3ds_set_menu_presentation(current_scene==1); // DS 4:3 dual-screen layout in the menu only.
  }
  return __real__ZN8dScene_c16SpawnIfNecessaryEv();

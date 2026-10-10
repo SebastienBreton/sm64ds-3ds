@@ -35,9 +35,16 @@ extern "C" unsigned long long svcGetSystemTick(void); // libctru (types.h clashe
 extern "C" volatile uint64_t sm64ds_frame_prof[48];
 namespace { struct FsScope{unsigned slot;uint64_t start;explicit FsScope(unsigned s):slot(s),start(svcGetSystemTick()){}~FsScope(){sm64ds_frame_prof[slot]+=svcGetSystemTick()-start;}}; }
 #define FS_PROFILE(slot) FsScope fs_profile_scope(slot)
+static inline unsigned long long fs_ticks(){return svcGetSystemTick();}
 #else
 #define FS_PROFILE(slot)
+static inline unsigned long long fs_ticks(){return 0;}
 #endif
+// recroom-lag: SD access counters (read by diagnostics; never reset here).
+// [0] game-thread SD opens, [1] bytes, [2] ticks; [3] opens served from RAM
+// (prefetch table / ROM cache / archive / raw cache); [4] prefetch-thread SD
+// opens, [5] bytes, [6] ticks; [7] prefetch-thread passes completed.
+extern "C" { volatile unsigned long long sm64ds_fs_stats[8]; }
 #include <stdlib.h>
 #include <string.h>
 #include "pristine_raw_cache.h"
@@ -215,37 +222,133 @@ static void catalog_load(void)
 // low-priority core-1 thread reads them into RAM during boot/menus; loads
 // consult this append-only table first (bytes are immutable ROM data).
 struct PrefetchEntry { u32 id; u8 *data; u32 size; };
-enum { PREFETCH_MAX = 512, PREFETCH_MAX_FILE = 16 * 1024 };
+enum { PREFETCH_MAX = 1024, PREFETCH_MAX_FILE = 16 * 1024, PREFETCH_MAX_MG_FILE = 32 * 1024 };
 static PrefetchEntry g_prefetch[PREFETCH_MAX];
 static volatile u32 g_prefetch_count = 0;
+static volatile u16 g_prefetch_index[MAX_FILES]; // file id -> entry index + 1 (0 = not resident)
 static int g_prefetch_started = 0;
+static volatile bool g_prefetch_stop = false; // set at exit: the thread must not outlive the process
+// recroom-lag: the Rec Room menu (overlay 5, dScMiniGm_c) re-reads its art on
+// every character-tab switch (func_ov005_020c16e4: 2 screen maps + 9 card
+// thumbnails + 9 palettes = 20 ROM files) and ~12 more at scene entry; every
+// mini-game start opens ~60 small MG/ files (shared message/pause/option art
+// + its own models/animations). On the DS these are sub-millisecond card
+// reads; through the 3DS SD every open costs ~25 ms guest time in Azahar (and
+// several ms on hardware), and the 64-slot ROM cache cannot hold 4 tabs x 20
+// files, so each tab switch froze ~0.5 s. The whole MG/ directory is small
+// (549 files, 1.4 MB), so the thread keeps it resident:
+//   1. Rec Room menu art (91 files, 139 KB) -- needed first, seconds after boot
+//   2. player animations + 2D palettes (castle-30fps, unchanged set)
+//   3. mini-game UI shared by every mini-game (msg/common/option/pause/result)
+//   4. the rest of MG/ (per-mini-game models, animations, backgrounds)
+// SM64DS_RECROOM_PREFETCH=0 restores the previous behaviour (pass 2 only).
+static bool recroom_prefetch_enabled(){
+    static const bool enabled=[](){const char* v=getenv("SM64DS_RECROOM_PREFETCH");return !v || strcmp(v,"0")!=0;}();
+    return enabled;
+}
+static bool prefetch_recroom(const char *p){
+    return strncmp(p,"MG/d_2d_thum_",13)==0 || strncmp(p,"MG/d_2d_mg_bg_menu",18)==0 ||
+           strncmp(p,"MG/d_2d_mg_menu_touch",21)==0;
+}
 static bool prefetch_wanted(const char *p){
     return strncmp(p,"data/player/",12)==0 || strncmp(p,"data/2D_cad/",12)==0;
 }
-static void prefetch_thread(void *)
+static bool prefetch_mg_common(const char *p){
+    return strncmp(p,"MG/d_2d_msg_",12)==0 || strncmp(p,"MG/d_2d_mg_common",17)==0 ||
+           strncmp(p,"MG/d_2d_mg_option",17)==0 || strncmp(p,"MG/d_2d_mg_bg_option",20)==0 ||
+           strncmp(p,"MG/d_2d_mg_bg_pause",19)==0 || strncmp(p,"MG/d_2d_mg_bg_result",20)==0 ||
+           strncmp(p,"MG/d_2d_mg_result",17)==0;
+}
+static bool prefetch_mg_rest(const char *p){ return strncmp(p,"MG/",3)==0; }
+// Scene hint from game_main (sm64ds_fs_prefetch_scene): while the player is in
+// the Rec Room or a mini-game the MG/ passes go first; in the castle/levels
+// the player pass goes first. A pass interrupted by the hint resumes later.
+static volatile unsigned g_prefetch_scene = 1;
+extern "C" void sm64ds_fs_prefetch_scene(unsigned scene) { __atomic_store_n(&g_prefetch_scene, scene, __ATOMIC_RELEASE); }
+static bool prefetch_minigame_side(){ const unsigned s=__atomic_load_n(&g_prefetch_scene,__ATOMIC_ACQUIRE); return s==5 || (s>=361 && s<=396); }
+static bool prefetch_gameplay_side(){ const unsigned s=__atomic_load_n(&g_prefetch_scene,__ATOMIC_ACQUIRE); return s==3 || s==4; }
+static volatile u8 g_prefetch_tried[MAX_FILES]; // attempted once (resident, missing or too large)
+struct PrefetchPass { const char *name; bool (*wanted)(const char *); u32 max_file; bool (*yield)(); u32 files, bytes; unsigned long long ticks; bool done; };
+// Returns true when the pass has visited every wanted file.
+static bool prefetch_pass(PrefetchPass &pass)
 {
     char path[PATH_MAX_ * 2];
     for (u32 id = 0; id < MAX_FILES && g_prefetch_count < PREFETCH_MAX; ++id) {
-        if (!g_paths[id][0] || !prefetch_wanted(g_paths[id])) continue;
+        if (__atomic_load_n(&g_prefetch_stop, __ATOMIC_ACQUIRE)) return false;
+        if (!g_paths[id][0] || g_prefetch_tried[id] || !pass.wanted(g_paths[id])) continue;
+        if (pass.yield && pass.yield()) return false;
+        g_prefetch_tried[id] = 1;
+        const unsigned long long t0 = fs_ticks();
         snprintf(path, sizeof path, "%s/extracted/dsd/files/%s", asset_root(), g_paths[id]);
         FILE *f = fopen(path, "rb");
-        if (!f) continue;
-        long size = -1;
-        if (fseek(f, 0, SEEK_END) == 0) size = ftell(f);
-        if (size > 0 && size <= PREFETCH_MAX_FILE && fseek(f, 0, SEEK_SET) == 0) {
-            u8 *data = (u8 *)malloc((size_t)size);
-            if (data && fread(data, 1, (size_t)size, f) == (size_t)size) {
-                const u32 n = g_prefetch_count;
-                g_prefetch[n] = {id, data, (u32)size};
-                __atomic_store_n(&g_prefetch_count, n + 1, __ATOMIC_RELEASE);
-            } else free(data);
+        if (f) {
+            long size = -1;
+            if (fseek(f, 0, SEEK_END) == 0) size = ftell(f);
+            if (size > 0 && (u32)size <= pass.max_file && fseek(f, 0, SEEK_SET) == 0) {
+                u8 *data = (u8 *)malloc((size_t)size);
+                if (data && fread(data, 1, (size_t)size, f) == (size_t)size) {
+                    const u32 n = g_prefetch_count;
+                    g_prefetch[n] = {id, data, (u32)size};
+                    __atomic_store_n(&g_prefetch_count, n + 1, __ATOMIC_RELEASE);
+                    __atomic_store_n(&g_prefetch_index[id], (u16)(n + 1), __ATOMIC_RELEASE);
+                    ++pass.files; pass.bytes += (u32)size;
+                    sm64ds_fs_stats[5] += (unsigned long long)size;
+                } else free(data);
+            }
+            fclose(f);
         }
-        fclose(f);
+        const unsigned long long dt = fs_ticks() - t0;
+        pass.ticks += dt; sm64ds_fs_stats[4] += 1; sm64ds_fs_stats[6] += dt;
+    }
+    return g_prefetch_count < PREFETCH_MAX;
+}
+static void prefetch_run(PrefetchPass &pass)
+{
+    if (pass.done || __atomic_load_n(&g_prefetch_stop, __ATOMIC_ACQUIRE)) return;
+    if (!prefetch_pass(pass)) return;
+    pass.done = true; sm64ds_fs_stats[7] += 1;
+#ifdef __3DS__
+    // One line per pass in the user log: the real SD cost on hardware
+    // (time = SD time of this pass only; resident = whole table).
+    printf("fs prefetch: %s %u files %u bytes in %.1f ms (resident %u files)\n", pass.name, pass.files, pass.bytes,
+           double(pass.ticks) / 268111.856, unsigned(g_prefetch_count));
+#endif
+}
+static void prefetch_thread(void *)
+{
+    PrefetchPass player = {"player/2D", prefetch_wanted, PREFETCH_MAX_FILE, nullptr, 0, 0, 0, false};
+    if (!recroom_prefetch_enabled()) { prefetch_run(player); return; }
+    PrefetchPass menu = {"Rec Room menu", prefetch_recroom, PREFETCH_MAX_FILE, nullptr, 0, 0, 0, false};
+    PrefetchPass ui = {"mini-game UI", prefetch_mg_common, PREFETCH_MAX_MG_FILE, prefetch_gameplay_side, 0, 0, 0, false};
+    PrefetchPass rest = {"mini-game assets", prefetch_mg_rest, PREFETCH_MAX_MG_FILE, prefetch_gameplay_side, 0, 0, 0, false};
+    player.yield = prefetch_minigame_side;
+    prefetch_run(menu);
+    while (!__atomic_load_n(&g_prefetch_stop, __ATOMIC_ACQUIRE) && !(player.done && ui.done && rest.done)) {
+        if (g_prefetch_count >= PREFETCH_MAX) break;
+        if (prefetch_minigame_side() && !(ui.done && rest.done)) { prefetch_run(ui); prefetch_run(rest); continue; }
+        if (!player.done) { player.yield = prefetch_minigame_side; prefetch_run(player); if (player.done || prefetch_minigame_side()) continue; }
+        // Neither side asks: finish everything, nobody yields any more.
+        player.yield = ui.yield = rest.yield = nullptr;
+        prefetch_run(player); prefetch_run(ui); prefetch_run(rest);
+        if (g_prefetch_count >= PREFETCH_MAX) break;
     }
 }
 extern "C" void *threadCreate(void (*)(void *), void *, size_t, int, int, bool); // libctru
 extern "C" int APT_GetAppCpuTimeLimit(unsigned *percent);                       // libctru
 extern "C" int APT_SetAppCpuTimeLimit(unsigned percent);                        // libctru
+extern "C" int threadJoin(void *thread, unsigned long long timeout_ns);         // libctru
+extern "C" void threadFree(void *thread);                                       // libctru
+static void *g_prefetch_thread = nullptr;
+// recroom-lag: the passes now run ~20 s (Azahar) after boot. Quitting earlier
+// (HOME menu close, test harness end) used to leave the thread inside
+// fread/printf while the process tore down its heap and FS session (Azahar:
+// 577k unmapped accesses after main returned). atexit handlers run before
+// libctru's service shutdown, so stop and join it there.
+static void prefetch_shutdown(void)
+{
+    __atomic_store_n(&g_prefetch_stop, true, __ATOMIC_RELEASE);
+    if (g_prefetch_thread) { threadJoin(g_prefetch_thread, ~0ULL); threadFree(g_prefetch_thread); g_prefetch_thread = nullptr; }
+}
 static void prefetch_start_once(void)
 {
     if (g_prefetch_started) return;
@@ -259,15 +362,16 @@ static void prefetch_start_once(void)
     // for the same 80%.
     unsigned limit = 0;
     if (APT_GetAppCpuTimeLimit(&limit) >= 0 && limit == 0) APT_SetAppCpuTimeLimit(80);
-    if (!threadCreate(prefetch_thread, nullptr, 16 * 1024, 0x3f, 1, true))
-        fprintf(stderr, "fs: prefetch thread unavailable\n");
+    g_prefetch_thread = threadCreate(prefetch_thread, nullptr, 16 * 1024, 0x3f, 1, false);
+    if (!g_prefetch_thread) fprintf(stderr, "fs: prefetch thread unavailable\n");
+    else atexit(prefetch_shutdown);
 #endif
 }
 static const PrefetchEntry *prefetch_find(u32 id)
 {
-    const u32 n = __atomic_load_n(&g_prefetch_count, __ATOMIC_ACQUIRE);
-    for (u32 i = 0; i < n; ++i) if (g_prefetch[i].id == id) return &g_prefetch[i];
-    return 0;
+    if (id >= MAX_FILES) return 0;
+    const u32 n = __atomic_load_n(&g_prefetch_index[id], __ATOMIC_ACQUIRE);
+    return n ? &g_prefetch[n - 1] : 0;
 }
 
 // ---- the game-facing surface ---------------------------------------------
@@ -379,7 +483,9 @@ void *_ZN13SharedFilePtr4LoadEv(struct SharedFilePtrC *self)
         std::size_t size=0;raw=pristine_cache.copy_hit(self->fileID,path,size);
         if(raw)fsize=static_cast<long>(size);
     }
+    if(raw)sm64ds_fs_stats[3]+=1;
     if(!raw){
+    const unsigned long long sd_t0=fs_ticks();
     f = fopen(path, "rb");
     if (!f) {
         /* a cataloged file missing on disk is a data hole (regional variants
@@ -399,6 +505,7 @@ void *_ZN13SharedFilePtr4LoadEv(struct SharedFilePtrC *self)
         return 0; /* real Load returns 0 on a short read */
     }
     fclose(f);
+    sm64ds_fs_stats[0]+=1;sm64ds_fs_stats[1]+=(unsigned long long)fsize;sm64ds_fs_stats[2]+=fs_ticks()-sd_t0;
     if(pristine_enabled())pristine_cache.insert(self->fileID,path,raw,static_cast<std::size_t>(fsize));
     }
 
@@ -550,6 +657,7 @@ extern "C" int func_0204ee10(void *self) {
 // fraction of a millisecond there but an SD open (~10 ms) per call here.
 // ROM files are immutable; entries with open handles are never evicted.
 static const u32 NATIVE_CACHED_FILE = 0x43414348;
+static const u32 NATIVE_PREFETCH_FILE = 0x50524546; // recroom-lag: served from g_prefetch (immutable)
 struct CachedRomFile { u32 id; u8 *data; u32 size, open; unsigned long long age; };
 enum { ROM_CACHE_SLOTS = 64, ROM_CACHE_MAX_FILE = 64 * 1024, ROM_CACHE_BUDGET = 128 * 1024 };
 static CachedRomFile rom_cache[ROM_CACHE_SLOTS];
@@ -617,7 +725,7 @@ extern "C" int func_0205d568(void *self, NativeFileID id)
     FS_PROFILE(22);
     if (!self) return 0;
     u32 *state=(u32*)self;
-    if (state[2]==NATIVE_ROM_ARCHIVE || state[2]==NATIVE_MEMORY_ARCHIVE || state[2]==NATIVE_CACHED_FILE) return 0;
+    if (state[2]==NATIVE_ROM_ARCHIVE || state[2]==NATIVE_MEMORY_ARCHIVE || state[2]==NATIVE_CACHED_FILE || state[2]==NATIVE_PREFETCH_FILE) return 0;
     if (NativeArchive *a=native_archive(id.archive)) {
         if (id.file>=a->count) return 0;
         u32 first=archive_word(a->fat+12+id.file*8),end=archive_word(a->fat+16+id.file*8);
@@ -642,12 +750,25 @@ extern "C" int func_0205d568(void *self, NativeFileID id)
         state[8]=0;state[9]=c.size;state[10]=0;
         return 1;
     };
-    if (rom_cache_enabled()) { const int slot=rom_cache_find(id.file); if (slot>=0) return open_cached(slot); }
+    if (rom_cache_enabled()) { const int slot=rom_cache_find(id.file); if (slot>=0) { sm64ds_fs_stats[3]+=1; return open_cached(slot); } }
     prefetch_start_once();
-    if (rom_cache_enabled()) if (const PrefetchEntry *e=prefetch_find(id.file)) {
-        const int slot=rom_cache_insert_bytes(id.file,e->data,e->size);
-        if (slot>=0) return open_cached(slot);
+    if (const PrefetchEntry *e=prefetch_find(id.file)) {
+        if (recroom_prefetch_enabled()) {
+            // Prefetched ROM bytes never move or die: read them in place
+            // instead of copying into (and churning) the small ROM cache.
+            const u8 *ptr=e->data;memcpy(self,&ptr,sizeof ptr);
+            state[2]=NATIVE_PREFETCH_FILE;state[5]=(u32)(e-g_prefetch);
+            state[3]=(state[3]|0x10)&~0x20;
+            state[8]=0;state[9]=e->size;state[10]=0;
+            sm64ds_fs_stats[3]+=1;
+            return 1;
+        }
+        if (rom_cache_enabled()) {
+            const int slot=rom_cache_insert_bytes(id.file,e->data,e->size);
+            if (slot>=0) { sm64ds_fs_stats[3]+=1; return open_cached(slot); }
+        }
     }
+    const unsigned long long sd_t0=fs_ticks();
     FILE *f = fopen(path, "rb");
 #ifdef __3DS__
     if(getenv("SM64DS_TRACE_FILE_LOADS"))printf("FILE_OPEN id=%u ms=%.2f path=%s\n",unsigned(id.file),double(svcGetSystemTick()-fs_profile_scope.start)/268111.856,path);
@@ -660,9 +781,10 @@ extern "C" int func_0205d568(void *self, NativeFileID id)
     }
     if (rom_cache_enabled() && size<=ROM_CACHE_MAX_FILE) {
         const int slot=rom_cache_insert(id.file,f,(u32)size);
-        if (slot>=0) { fclose(f); return open_cached(slot); }
+        if (slot>=0) { fclose(f); sm64ds_fs_stats[0]+=1;sm64ds_fs_stats[1]+=(u32)size;sm64ds_fs_stats[2]+=fs_ticks()-sd_t0; return open_cached(slot); }
         if (fseek(f, 0, SEEK_SET) != 0) { fclose(f); return 0; }
     }
+    sm64ds_fs_stats[0]+=1;sm64ds_fs_stats[2]+=fs_ticks()-sd_t0; // streamed: bytes counted in FS_ReadFile
     memcpy(self, &f, sizeof f);
     u32 *words = (u32 *)self;
     words[2] = id.archive;
@@ -677,6 +799,16 @@ extern "C" int FS_ReadFile(void *self, void *destination, int requested)
     if (((u32*)self)[2]==NATIVE_CACHED_FILE) {
         u32 *w=(u32*)self;
         if (w[5]>=ROM_CACHE_SLOTS || !rom_cache[w[5]].data || w[10]>w[9]) return -1;
+        u32 size=(u32)requested;
+        if (size>w[9]-w[10]) size=w[9]-w[10];
+        const u8 *ptr;memcpy(&ptr,self,sizeof ptr);
+        if (size) memcpy(destination,ptr+w[10],size);
+        w[10]+=size;
+        return (int)size;
+    }
+    if (((u32*)self)[2]==NATIVE_PREFETCH_FILE) {
+        u32 *w=(u32*)self;
+        if (w[5]>=PREFETCH_MAX || w[10]>w[9]) return -1;
         u32 size=(u32)requested;
         if (size>w[9]-w[10]) size=w[9]-w[10];
         const u8 *ptr;memcpy(&ptr,self,sizeof ptr);
@@ -701,7 +833,9 @@ extern "C" int FS_ReadFile(void *self, void *destination, int requested)
     u32 size = (u32)requested;
     if (size > words[9] - words[10]) size = words[9] - words[10];
     if (!size) return 0;
+    const unsigned long long sd_t0=fs_ticks();
     size_t got = fread(destination, 1, size, f);
+    sm64ds_fs_stats[1]+=got;sm64ds_fs_stats[2]+=fs_ticks()-sd_t0;
     words[10] += (u32)got;
     return ferror(f) ? -1 : (int)got;
 }
@@ -712,6 +846,10 @@ extern "C" int FS_CloseFile(void *self)
         const u32 slot=((u32*)self)[5];
         if (slot>=ROM_CACHE_SLOTS || !rom_cache[slot].data || !rom_cache[slot].open) return 0;
         --rom_cache[slot].open;
+        FS_InitFile(self);
+        return 1;
+    }
+    if (((u32*)self)[2]==NATIVE_PREFETCH_FILE) {
         FS_InitFile(self);
         return 1;
     }

@@ -1,6 +1,7 @@
 // analog-pad: see analog_pad.h.
 #include "analog_pad.h"
 #include "enhance_settings.h"
+#include "cstick_camera.h"
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -58,6 +59,8 @@ void init() {
 struct Sample { int x, y; bool dpad; };
 Sample sample() {
     if (g_inject) return {g_ix, g_iy, g_idpad};
+    // visual-enhancements: the settings screen swallows every input.
+    if (enhance::live().overlay_open.load(std::memory_order_relaxed)) return {0, 0, false};
 #ifdef __3DS__
     // hidScanInput() already ran for this update (func_02019390 wrapper).
     circlePosition c{};
@@ -151,6 +154,9 @@ unsigned sm64ds_analog_pad_applied() { return analog_pad::g_applied; }
 void __wrap__ZN5Stage10CheckInputEv(void* self) {
     __real__ZN5Stage10CheckInputEv(self);
     analog_pad::apply();
+    // cstick-camera: C-Stick camera commands on the same command record
+    // (apply() above already loaded settings.ini when nobody published it).
+    cstick_camera::after_check_input();
 }
 
 // dMap_c draws the touch-stick circle whenever touching=1. Only the analog

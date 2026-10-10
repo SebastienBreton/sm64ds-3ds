@@ -442,6 +442,8 @@ bool Composite::opaque(Surface& output,ntr::PpuPreparedCandidates candidates,
     const bool base_lookup=master_effect || uniform;
     // No selection mask is sampled by a geometry-independent opaque image or
     // uniform fade. Omit the CPU loop and texture upload in those cases.
+    // minigames-30fps-min: a 2D-only mode1 pair blend still needs obj_first.
+    if(scene.bg_first_blend && !scene.has_geometry)return obj_first(output,candidates,geometry,resident,base_lookup,base_table,2);
     if(!scene.has_geometry && (!layer_effect || uniform)){
         if(base_lookup){channel_table(base_table);map(output,front_);}
         else if(encode)copy_rgb(output,front_);
@@ -642,6 +644,20 @@ bool Composite::obj_first(Surface& output,ntr::PpuPreparedCandidates candidates,
     }
     const bool mask_cached=sig && sig==obj_mask_sig_;
     if(mask_cached){any_back=obj_mask_any_back_;any_geometry=obj_mask_any_geometry_;}
+    if(!mask_cached && variant==2 && !scene.has_geometry && !windows){
+        // minigames-30fps-min: 2D-only pair blend (no 3D, no window): the mask
+        // is G = (front blends) && second(back), a function of the two layer
+        // bytes only (same values as the general loop below).
+        uint32_t lut[256];
+        for(unsigned f=0;f<256;++f){
+            const unsigned layer=f&7;const bool blending=(f&0x80) || ((scene.blend>>layer)&1);
+            lut[f]=blending?1u:0u;
+        }
+        uint32_t back_lut[8];for(unsigned l=0;l<8;++l)back_lut[l]=second(l)?0xff00u:0u;
+        uint32_t any=0;
+        for(unsigned i=0;i<256*192;++i){const uint32_t m=lut[fl[i]]?back_lut[bl[i]&7]:0u;mask_pixels_[i]=m;any|=m;}
+        any_back=any!=0;
+    }else
     for(unsigned i=0;!mask_cached && i<256*192;++i){
         const unsigned layer=fl[i]&7;
         const bool geom=scene.has_geometry && (g<fp[i] || (g==fp[i] && layer!=4));
@@ -654,7 +670,7 @@ bool Composite::obj_first(Surface& output,ntr::PpuPreparedCandidates candidates,
             const bool visible=scene.has_geometry && (window&1);
             const bool front_geom=visible && (g<fp[i] || (g==fp[i] && layer!=4));
             if(front_geom)m|=second(layer)?0xffu:0xff0000u;
-            const bool blending=(fl[i]&0x80) || (variant==2 && (window&32) && layer!=0 && ((scene.blend>>layer)&1));
+            const bool blending=(fl[i]&0x80) || (variant==2 && (window&32) && (layer!=0 || !scene.has_geometry) && ((scene.blend>>layer)&1));
             if(blending){
                 if(!front_geom && visible && (g<bp[i] || (g==bp[i] && (bl[i]&7)!=4))){m|=0xff000000u;any_geometry=true;}
                 if(second(bl[i])){m|=0xff00u;any_back=true;}
@@ -675,6 +691,7 @@ bool Composite::obj_first(Surface& output,ntr::PpuPreparedCandidates candidates,
     }
     if(base_lookup){channel_table(base_table);map(output,front_);}else copy_rgb(output,front_);
     auto geometry_passes=[&]{
+        if(!scene.has_geometry)return; // minigames-30fps-min: 2D-only pair blend (no 3D selection)
         if(base_lookup)channel_table(base_table);
         masked(output,geometry,resident,0,base_lookup);
         masked(output,geometry,resident,2,base_lookup,true);

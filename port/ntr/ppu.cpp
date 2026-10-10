@@ -1953,6 +1953,8 @@ static void prepare_scene(Engine eng,PpuPreparedScene& scene,Framebuffer* unreso
         }
     }
     layer_reusable=layer_reusable && tiles_ok;
+    const double obj_t1=prepare_clock?prepare_clock():0; // diagnostics (PPU_OBJ_DETAIL)
+    double obj_t2=0;
     ObjClip clip{};
     // minigames-30fps-min: the changed sprites' boxes, clustered, instead of
     // their single bounding box (moving sprites at both screen ends made the
@@ -2010,6 +2012,7 @@ static void prepare_scene(Engine eng,PpuPreparedScene& scene,Framebuffer* unreso
             const auto& b=boxes[k];
             for(int y=b.y0;y<b.y1;++y)std::memset(priorities+y*SCREEN_W+b.x0,0xff,b.x1-b.x0);
         }
+        if(prepare_clock)obj_t2=prepare_clock();
         for(unsigned k=0;k<box_count;++k)scan_obj(eng,put,false,capture_source,NoObjBox{},boxes[k]);
         for(unsigned i=0;i<128;++i){int bx0,bx1,by0,by1;if(obj_box(oam_now,i,bx0,bx1,by0,by1)){
             x0=std::min(x0,bx0);x1=std::max(x1,bx1);y0=std::min(y0,by0);y1=std::max(y1,by1);}}
@@ -2026,6 +2029,7 @@ static void prepare_scene(Engine eng,PpuPreparedScene& scene,Framebuffer* unreso
     static const bool bounded=std::getenv("PPU_REFERENCE_OBJ")==nullptr;
     if(!bounded){x0=0;x1=SCREEN_W;y0=0;y1=SCREEN_H;}
     if(x0>=x1 || y0>=y1){x0=x1=y0=y1=0;}
+    const double obj_t3=prepare_clock?prepare_clock():0;
     // Region of the scene to recompose from the BG planes and the layer.
     int mx0=x0,mx1=x1,my0=y0,my1=y1;
     bool scan_semi=false,boxed=false;
@@ -2089,6 +2093,14 @@ static void prepare_scene(Engine eng,PpuPreparedScene& scene,Framebuffer* unreso
     }
     if(prepare_clock)stamp[3]=prepare_clock();
     {
+        static const bool detail=std::getenv("PPU_OBJ_DETAIL")!=nullptr;static unsigned printed=0;
+        if(detail && prepare_clock && stamp[3]-stamp[2]>8 && printed<60){++printed;
+            unsigned sprites=0;for(unsigned i=0;i<128;++i){int a,b,c,d;sprites+=obj_box(oam_now,i,a,b,c,d);}
+            long area=0;for(unsigned k=0;k<box_count;++k)area+=long(boxes[k].x1-boxes[k].x0)*(boxes[k].y1-boxes[k].y0);
+            std::printf("PPU_OBJ_DETAIL eng=%u reusable=%u sprites=%u boxes=%u boxArea=%ld clip=%dx%d tiles=%u gather=%.2f scan=%.2f(%.2f) merge=%.2f total=%.2f\n",
+                unsigned(eng),unsigned(layer_reusable),sprites,box_count,area,clip.x1-clip.x0,clip.y1-clip.y0,unsigned(tiles_now.size()),
+                obj_t1-stamp[2],obj_t3-obj_t1,obj_t2?obj_t3-obj_t2:0.0,stamp[3]-obj_t3,stamp[3]-stamp[2]);
+        }
         // minigames-30fps-min diagnostics: OBJ incremental coverage.
         static const bool trace=std::getenv("PPU_OBJ_TRACE")!=nullptr;
         if(trace){
@@ -2963,6 +2975,39 @@ static std::optional<PpuPreparedCandidates> background_candidates_impl(Engine en
         background_transfers.planes_avoided+=sizeof(PpuBackgroundPlanes);
     }else ++background_transfers.immutable_misses;
     if(preblend){
+        // minigames-30fps-min (Loves Me): leave the mode1 pair blend to the GPU
+        // composition (state.bg_first_blend without geometry: Composite::
+        // obj_first variant 2, same exact rule as the CPU preblend below) when
+        // no visible OBJ priority can sit between a first-target BG and a
+        // second-target BG/backdrop (conservative, from BGxCNT priorities).
+        // Saves the full-screen CPU preblend after every scroll.
+        // PPU_NO_GPU_BG_PAIR_BLEND=1 keeps the CPU preblend.
+        static const bool gpu_pair=std::getenv("PPU_NO_GPU_BG_PAIR_BLEND")==nullptr;
+        if(gpu_pair){
+            unsigned first_prio=0,second_prio=0; // bit p: a target layer at priority p (4 = backdrop)
+            for(unsigned bg=0;bg<4;++bg)if(disp&(0x100u<<bg)){
+                const unsigned prio=rd16(em.reg_base+8+bg*2)&3;
+                if((scene.blend>>bg)&1)first_prio|=1u<<prio;
+                if((scene.blend>>(8+bg))&1)second_prio|=1u<<prio;
+            }
+            if(scene.blend&0x2000)second_prio|=1u<<4;
+            bool between=false;
+            if(disp&(1u<<12)){
+                const unsigned oam=eng==ENGINE_A?0x07000000u:0x07000400u;
+                for(unsigned k=0;k<128 && !between;++k){
+                    const unsigned a0=rd16(oam+k*8),a2=rd16(oam+k*8+4);
+                    if(!(a0&0x100) && (a0&0x200))continue;
+                    const unsigned q=(a2>>10)&3;
+                    for(unsigned f=0;f<q;++f)if(first_prio&(1u<<f))for(unsigned b=q;b<5;++b)if(second_prio&(1u<<b))between=true;
+                }
+            }
+            if(!between){
+                PpuPreparedCandidates view{scene,planes,cache.generation};
+                view.front_alpha_encoded=cache.alpha_encoded[cache.current];
+                view.state.bg_first_blend=true;
+                return view;
+            }
+        }
         // Exactly compose_candidates' geometry-free mode1 rule: a front
         // pixel of a first target over a second-target back pixel becomes
         // the DS blend. OBJs are not targets here, so an OBJ in front keeps
@@ -3174,6 +3219,7 @@ void ppu_compose_candidates(PpuPreparedCandidates candidates,const Framebuffer& 
         for(unsigned y=rect.y0;y<rect.y1;++y)std::fill_n(&output.px[y][rect.x0],rect.x1-rect.x0,cut->color);
     }
 }
+bool ppu_windows_binary(Engine eng){return windows_binary(eng);}
 bool ppu_window_cut_unchanged(Engine eng){
     WindowCutScope scope;
     return window_cut_signature(eng)==g_window_cut_issued[eng];

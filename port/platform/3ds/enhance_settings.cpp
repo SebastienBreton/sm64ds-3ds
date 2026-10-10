@@ -13,9 +13,10 @@ Settings Settings::recommended() {
     Settings s;
     s.logo_hd = true;
     s.logo_method = 7;                       // Xbr (4xBR)
-    s.gameplay_filter = ScreenFilter::Sharp; // same 2-pass filter as the menu
+    // In-game "sharp" stays off: +8-9 ms per update in Azahar (core-1 work of
+    // 12 extra draws/7 target switches), late updates in heavy courses.
     s.tex_filter = TexFilter::Auto;
-    s.res3d = Res3d::Native;
+    s.res3d = Res3d::Ds;                     // 3D AA costs 2x the 3D fill: opt-in only
     return s;
 }
 
@@ -24,7 +25,8 @@ bool Settings::operator==(const Settings& o) const {
            top_layout == o.top_layout && screen_filter == o.screen_filter &&
            full_width_sky == o.full_width_sky && gameplay_filter == o.gameplay_filter &&
            res3d == o.res3d && tex_filter == o.tex_filter && show_fps == o.show_fps &&
-           gpu_timing == o.gpu_timing && circle_pad_analog == o.circle_pad_analog;
+           gpu_timing == o.gpu_timing && circle_pad_analog == o.circle_pad_analog &&
+           camera_cstick == o.camera_cstick;
 }
 
 namespace {
@@ -76,6 +78,12 @@ int apply(const char* section, const char* key, const char* val, Settings& s) {
         if (ieq(val, "analog") || ieq(val, "analogique")) { s.circle_pad_analog = true; return 1; }
         if (ieq(val, "ds") || ieq(val, "digital") || ieq(val, "numerique")) { s.circle_pad_analog = false; return 1; }
         return parse_bool(val, b) ? (s.circle_pad_analog = b, 1) : -1;
+    }
+    if (ieq(full, "input.camera_cstick")) {
+        if (ieq(val, "off") || ieq(val, "0") || ieq(val, "non")) { s.camera_cstick = 0; return 1; }
+        if (ieq(val, "ds") || ieq(val, "arrows") || ieq(val, "fleches") || ieq(val, "1")) { s.camera_cstick = 1; return 1; }
+        if (ieq(val, "free") || ieq(val, "libre") || ieq(val, "2")) { s.camera_cstick = 2; return 1; }
+        return -1;
     }
     return 0;
 }
@@ -135,11 +143,13 @@ int write_ini(const Settings& s, char* out, int cap) {
         "show_fps = %d\n"
         "gpu_timing = %d\n"
         "[input]\n"
-        "circle_pad = %s      ; analog (vitesse selon l'inclinaison) | ds (croix numerique, Y pour courir)\n",
+        "circle_pad = %s      ; analog (vitesse selon l'inclinaison) | ds (croix numerique, Y pour courir)\n"
+        "camera_cstick = %s   ; New 3DS: ds (= fleches camera de l'ecran tactile, bas = L, haut = X) | free (camera libre analogique) | off\n",
         int(s.logo_hd), s.logo_method < kMethodCount ? kMethods[s.logo_method] : "xbr", int(s.ui_hd),
         kLayouts[int(s.top_layout) % 3], kFilters[int(s.screen_filter) % 2], int(s.full_width_sky),
         kFilters[int(s.gameplay_filter) % 2], kRes[int(s.res3d) % 3], kTex[int(s.tex_filter) % 3],
-        int(s.show_fps), int(s.gpu_timing), s.circle_pad_analog ? "analog" : "ds");
+        int(s.show_fps), int(s.gpu_timing), s.circle_pad_analog ? "analog" : "ds",
+        s.camera_cstick == 0 ? "off" : s.camera_cstick == 2 ? "free" : "ds");
     return n;
 }
 
@@ -188,6 +198,7 @@ void publish(const Settings& s) {
     g_live.show_fps.store(s.show_fps, std::memory_order_relaxed);
     g_live.gpu_timing.store(s.gpu_timing, std::memory_order_relaxed);
     g_live.circle_pad_analog.store(s.circle_pad_analog, std::memory_order_relaxed);
+    g_live.camera_cstick.store(s.camera_cstick, std::memory_order_relaxed);
     g_live.generation.fetch_add(1, std::memory_order_release);
 }
 
@@ -199,6 +210,20 @@ Settings boot_apply(const char* path) {
     Settings s = Settings::safe();
     ParseReport r;
     const bool loaded = load_file(path, s, &r);
+    // Dev/test override (env.txt, ignored by user builds): SM64DS_SETTINGS=
+    // "2d.logo_hd=1;3d.texture_filter=auto" (section.key=value, ';'-separated).
+    if (const char* extra = std::getenv("SM64DS_SETTINGS")) {
+        char text[1024]; int n = 0;
+        for (const char* p = extra; *p && n < int(sizeof text) - 40;) {
+            const char* end = std::strchr(p, ';'); if (!end) end = p + std::strlen(p);
+            const char* dot = static_cast<const char*>(std::memchr(p, '.', size_t(end - p)));
+            if (dot) n += std::snprintf(text + n, sizeof text - size_t(n), "[%.*s]\n%.*s\n", int(dot - p), p, int(end - dot - 1), dot + 1);
+            p = *end ? end + 1 : end;
+        }
+        text[n] = 0;
+        const ParseReport e = parse_ini(text, s);
+        std::printf("Settings override SM64DS_SETTINGS: applied=%d unknown=%d invalid=%d\n", e.applied, e.unknown, e.invalid);
+    }
     publish(s);
     auto export_env = [](const char* name, const char* value) {
         if (!std::getenv(name)) setenv(name, value, 0);

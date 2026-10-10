@@ -23,7 +23,9 @@ std::uint16_t light_color(const Env& e,const int normal[3],const std::uint8_t* s
     }
     std::uint16_t color=0;
     for(int k=0;k<3;++k){const std::uint32_t value=c[k]>>14;color|=(value>31?31:value)<<(5*k);}
-    return e.toon?e.table[color&31]:color; // toon env (face-toy): ToonTable[red]
+    // toon env (face-toy): ToonTable[red]; highlight env: grey red base (the
+    // additive ToonTable[red] term is a GPU pass, not part of the vertex colour)
+    return e.toon==1?e.table[color&31]:e.toon==2?std::uint16_t((color&31)*0x421u):color;
 }
 }
 

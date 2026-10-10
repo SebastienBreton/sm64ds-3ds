@@ -43,6 +43,10 @@ struct Settings {
     // digital D-pad. Default ON at the user's request; kept by safe() and
     // recommended() (not a display option).
     bool circle_pad_analog = true;
+    // input (cstick-camera, cstick_camera.h): New 3DS C-Stick camera.
+    // 0 = off, 1 = DS arrows (same commands as the touch-screen camera
+    // arrows / L / X), 2 = free analog camera. Kept by safe()/recommended().
+    uint8_t camera_cstick = 1;
 
     // Current behaviour of the port (every new feature off). Used until the
     // features are validated on real hardware.
@@ -81,6 +85,9 @@ struct Live {
     std::atomic<bool> show_fps{false};
     std::atomic<bool> gpu_timing{false};
     std::atomic<bool> circle_pad_analog{true};
+    std::atomic<uint8_t> camera_cstick{1};
+    // Settings screen open (enhance_runtime): the game sees no input.
+    std::atomic<bool> overlay_open{false};
     std::atomic<uint32_t> generation{0};   // bumped on every publish
 };
 Live& live();

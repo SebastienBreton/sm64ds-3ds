@@ -8,6 +8,7 @@
 #include <unistd.h>
 #include "cpu_mode.h"
 #include "renderer_defaults.h"
+#include "enhance_settings.h"
 
 int smoke_main(); // game_main.cpp, compiled with the shared target's flags
 extern "C" {
@@ -86,6 +87,9 @@ int main(){
  std::freopen("sdmc:/sm64ds/log.txt","w",stdout);stderr=stdout;
 #endif
  setvbuf(stdout,nullptr,_IONBF,0);
+ // visual-enhancements: sdmc:/sm64ds/settings.ini (absent = current defaults);
+ // boot-only options become env switches unless env.txt already set them.
+ enhance::boot_apply();
  if(!sm64ds_configure_renderer_defaults()){
   std::fprintf(stderr,"FATAL: renderer settings initialization failed\n");return 1;
  }

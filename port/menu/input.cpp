@@ -2,6 +2,7 @@
 // The menu renders DS coordinates 256x192; fullscreen 3DS bottom is 320x240.
 #include <3ds.h>
 #include <cstdint>
+#include <cstdlib>
 #include "platform/3ds/ds_input.h"
 extern "C" void sm64ds_menu_sample_touch(std::uint16_t* sample) {
  touchPosition position{};
@@ -35,10 +36,33 @@ extern "C" bool sm64ds_local_input_publish(std::uint16_t keys,const std::uint16_
  ++*reinterpret_cast<std::uint32_t*>(data_020a1040);
  return true;
 }
+// DS pen record timing (face-toy, melonDS reference): the game's touch record
+// reports the pen-down state one update late while the position is current:
+//   record(k) = pressed(k-1) ? (pressed(k) ? pos(k) : pos(k-1)) : released.
+// A press is seen one update after contact and a release one update late (the
+// last position is held); no tap is lost. The title-screen face toy grabs at
+// the second sample of a stroke on DS. SM64DS_DS_PEN_LATENCY=0 publishes the
+// raw 3DS pen instead. Scripted harnesses publish directly and are unaffected.
+static void ds_pen_record(std::uint16_t* touch){
+ static const bool enabled=[]{const char* s=std::getenv("SM64DS_DS_PEN_LATENCY");return !(s&&s[0]=='0');}();
+ static bool previous_down=false;static std::uint16_t previous_x=0,previous_y=0;
+ if(!enabled)return;
+ const bool down=touch[2]!=0;const std::uint16_t x=touch[0],y=touch[1];
+ if(!previous_down){touch[0]=touch[1]=0;touch[2]=0;}
+ else if(!down){touch[0]=previous_x;touch[1]=previous_y;touch[2]=1;}
+ previous_down=down;if(down){previous_x=x;previous_y=y;}
+}
 // Caller scans libctru HID once before polling.
+// visual-enhancements: the SELECT+START settings screen filters the keys
+// (enhance_runtime.h); while it is open the game sees no buttons and no pen.
+namespace enhance_runtime { std::uint32_t filter_input(std::uint32_t held,std::uint32_t down,bool& touch_allowed); }
 extern "C" bool sm64ds_menu_poll_input() {
  std::uint16_t touch[4];sm64ds_menu_sample_touch(touch);
- return sm64ds_local_input_publish(ds_input::buttons(hidKeysHeld()),touch);
+ bool touch_allowed=true;
+ const std::uint32_t held=enhance_runtime::filter_input(hidKeysHeld(),hidKeysDown(),touch_allowed);
+ if(!touch_allowed){touch[0]=touch[1]=0;touch[2]=0;}
+ ds_pen_record(touch);
+ return sm64ds_local_input_publish(ds_input::buttons(held),touch);
 }
 
 // Original main-loop input history/reset-combination BSS (020a0e44..58).

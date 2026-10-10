@@ -183,8 +183,13 @@ uint32_t bgr555_to_argb(uint16_t c) {
 // the rasterizer replace the vertex colour by ToonTable[vertex red] before the
 // texture modulation (GBATEK "Toon/Highlight", melonDS RenderToonTable[vr>>1]).
 // Latched at BEGIN_VTXS (the title/menu heads use it with a grey ramp table).
-// Highlight mode (DISP3DCNT bit 1 set) is not modelled.
+// Highlight mode (DISP3DCNT bit 1 set, file-select castle): every vertex colour
+// component is the red one and ToonTable[red] is ADDED after the texture
+// modulation (melonDS GPU3D_Soft). g_highlight: the GPU geometry path records a
+// highlight env (grey base pass + additive table pass, gx_gpu_backend.inc); the
+// CPU path only applies the grey base (no additive term).
 bool g_toon=false;
+bool g_highlight=false;
 uint16_t g_toon_table[32];
 // menu-regression: BEGIN_VTXS is hot (hundreds per menu frame) and 32 generic
 // io_read calls per latch cost ~5 ms/frame of game thread. TOON_TABLE
@@ -199,15 +204,18 @@ void toon_latch(){
     static const bool disabled=std::getenv("GX_NO_TOON")!=nullptr; // A/B toggle
     static const bool slow=std::getenv("GX_TOON_SLOW_LATCH")!=nullptr;
     if(slow){
-        g_toon=!disabled && ((g.active_polygon_attr>>4)&3)==2 && io_ready() && !(io_read(0x04000060,2)&2);
-        if(!g_toon)return;
+        const bool mode2=!disabled && ((g.active_polygon_attr>>4)&3)==2 && io_ready();
+        const bool hl=mode2 && (io_read(0x04000060,2)&2);
+        g_toon=mode2&&!hl;g_highlight=hl;
+        if(!mode2)return;
         for(unsigned i=0;i<32;++i)g_toon_table[i]=static_cast<uint16_t>(io_read(0x04000380+2*i,2)&0x7fff);
         ++g_toon_version;return;
     }
     // DISP3DCNT (0x04000060) is a plain mirror register too (io_read -> raw_read).
-    g_toon=!disabled && ((g.active_polygon_attr>>4)&3)==2 && io_ready() &&
-           !(*static_cast<const volatile uint8_t*>(host_ptr(0x04000060u))&2);
-    if(!g_toon)return;
+    const bool mode2=!disabled && ((g.active_polygon_attr>>4)&3)==2 && io_ready();
+    const bool hl=mode2 && (*static_cast<const volatile uint8_t*>(host_ptr(0x04000060u))&2);
+    g_toon=mode2&&!hl;g_highlight=hl;
+    if(!mode2)return;
     const void* mirror=host_ptr(0x04000380u);
     if(!std::memcmp(g_toon_raw,mirror,sizeof g_toon_raw) && g_toon_version)return;
     std::memcpy(g_toon_raw,mirror,sizeof g_toon_raw);
@@ -216,6 +224,7 @@ void toon_latch(){
 }
 inline uint16_t toon_bgr555(uint16_t c){return g_toon_table[c&31];}
 inline uint32_t toon_argb(uint32_t c){return (c&0xff000000u)|(bgr555_to_argb(g_toon_table[(c>>19)&31])&0x00ffffffu);}
+inline uint32_t grey_red_argb(uint32_t c){const uint32_t r=(c>>16)&255;return (c&0xff000000u)|(r<<16)|(r<<8)|r;}
 
 int signed11(int v) {
     v &= 2047;
@@ -263,7 +272,7 @@ GxVertex project(int16_t x, int16_t y, int16_t z) {
     out.z = (c.z * iw + 1.0f) * 0.5f;
     out.u = g.u;
     out.v = g.v;
-    out.color = g_toon ? toon_argb(g.color) : g.color;
+    out.color = g_toon ? toon_argb(g.color) : g_highlight ? grey_red_argb(g.color) : g.color;
     return out;
 }
 

@@ -23,10 +23,14 @@
 #include <cstdlib>
 #include <cstring>
 #include <unistd.h>
+#include <sys/stat.h>
 #include <unordered_map>
 #include <vector>
 
 #include "viewer_3ds.h"
+#include "enhance_settings.h"
+#include "enhance_runtime.h"
+#include "enhance_logo.h"
 #include "frame_profile.h"
 #include "platform/3ds/geometry_arena_viewer.h"
 #include "platform/3ds/gx_geometry_arena.h"
@@ -123,6 +127,14 @@ static V3dsVert* g_shadow_clear;
 #ifdef SM64DS_GPU_COMPOSITE_CANDIDATE
 static C3D_Tex g_resident_geometry[2];
 static C3D_RenderTarget* g_resident_geometry_target[2];
+// ingame-stereo: both eyes' DS geometry live in ONE 256x512 render target
+// (same VRAM as the former two 256x256 targets): g_resident_geometry[0/1]
+// are 256x256 views of its two halves, each with exactly the old layout.
+// Every batch's state is set once and drawn for both eyes (viewport +
+// scissor + stereo uniform per eye), instead of a second full draw pass.
+static C3D_Tex g_resident_stack;
+static C3D_RenderTarget* g_resident_stack_target;
+static bool g_resident_stacked=false;
 static ds_gpu::Composite g_resident_compositor[2];
 static ds_gpu::Surface g_resident_panels[3];
 static C3D_RenderTarget* g_resident_bottom;
@@ -224,6 +236,7 @@ static const u32 DISPLAY_TRANSFER_FLAGS =
 struct GpuTex {
     C3D_Tex tex;
     bool has_partial_alpha = false,has_opaque_alpha = false;
+    bool has_zero_alpha = false; // visual-enhancements: cut-out texels (texture filter policy)
     uint64_t frame=0,last_use=0;
 };
 // Immutable DS decodes carry a never-recycled version. External buffers still
@@ -312,7 +325,7 @@ static GpuTex *gpu_texture(const uint32_t *rgba, int w, int h, bool dynamic, uns
         g_texture_bytes+=t->tex.size;
         g_texcache[key] = t;
     }
-    t->has_partial_alpha = false;t->has_opaque_alpha=false;
+    t->has_partial_alpha = false;t->has_opaque_alpha=false;t->has_zero_alpha=false;
     u32 *dst = (u32 *)t->tex.data;
     // DS combines 5-bit texture and polygon alpha before rasterization.
     // Store the resulting blend weight, not merely texture alpha, in
@@ -342,6 +355,7 @@ static GpuTex *gpu_texture(const uint32_t *rgba, int w, int h, bool dynamic, uns
     for (unsigned ta = 0; ta < 32; ++ta) if (seen >> ta & 1) {
         t->has_partial_alpha |= alpha_of[ta] != 0 && alpha_of[ta] != 255;
         t->has_opaque_alpha |= alpha_of[ta] == 255;
+        t->has_zero_alpha |= alpha_of[ta] == 0;
     }
     C3D_TexFlush(&t->tex);
     C3D_TexSetFilter(&t->tex, GPU_NEAREST, GPU_NEAREST);
@@ -885,12 +899,164 @@ static bool layers_init(){
         layer_depths().sky,layer_depths().bg,layer_depths().obj,unsigned(linearSpaceFree()));
     return true;
 }
+// ---- visual-enhancements: HD title logo ---------------------------------------
+// Settings "Logo du titre HD". The logo is the upper engine's BG layer drawn
+// in the BG plane of the layered menu presentation (BG3 on the title). Once
+// that layer is stable (same BG planes for kHdStable frames), its pixels are
+// cropped (rect aligned to 4 DS pixels = whole LCD pixels at 1.25x) and
+// upscaled once by a low-priority background thread (enhance::upscale, 4xBR
+// by default: ~0.6 s of otherwise idle core-0 time on an old 3DS), cached on
+// SD (sdmc:/sm64ds/cache/logo-<key>.rgba, generated from the user's own game
+// data, never shipped). The layered presentation then draws this 1.25x
+// texture (512x256 RGBA8, linear memory) over the sky instead of the DS
+// plane; when the option is on, the layered path is used in mono too (eye 0
+// only). Until the image is ready, or while the logo moves/changes, the
+// DS plane is drawn as before. Option off: no CPU work, no allocation.
+namespace hdlogo {
+constexpr unsigned kHdStable=6;
+struct Job{
+    enhance::Image crop;enhance::Rect rect;uint8_t method=7;uint64_t key=0;
+    enhance::Image result;double ms=0;bool from_cache=false;
+    std::atomic<int> state{0}; // 0 idle, 1 running, 2 done, 3 failed
+};
+static Job g_job;
+static C3D_Tex g_tex;static bool g_tex_ok=false,g_tex_failed=false;
+static bool g_tex_valid=false;            // g_tex holds g_tex_key
+static uint64_t g_tex_key=0;static enhance::Rect g_tex_rect;static int g_tex_w=0,g_tex_h=0;
+static uint64_t g_current_key=0;static enhance::Rect g_current_rect;static bool g_current_valid=false;
+static unsigned g_stable=0;static unsigned g_layer=8;static uint8_t g_method=0xff;
+static bool g_drawable=false;             // this frame: draw the HD texture instead of the DS plane
+static void cache_path(char* out,size_t n,uint64_t key){std::snprintf(out,n,"sdmc:/sm64ds/cache/logo-%016llx.rgba",(unsigned long long)key);}
+static void job_main(void*){
+    Job& j=g_job;
+    const uint64_t t0=svcGetSystemTick();
+    char path[96];cache_path(path,sizeof path,j.key);
+    const int ow=j.rect.w()*5/4,oh=j.rect.h()*5/4;
+    bool ok=false;
+    if(FILE* f=std::fopen(path,"rb")){
+        uint32_t hdr[4]={};
+        if(std::fread(hdr,4,4,f)==4 && hdr[0]==0x4f474f4cu && int(hdr[1])==ow && int(hdr[2])==oh){
+            j.result=enhance::Image(ow,oh);
+            ok=std::fread(j.result.px.data(),4,j.result.px.size(),f)==j.result.px.size();
+            j.from_cache=ok;
+        }
+        std::fclose(f);
+    }
+    if(!ok){
+        j.result=enhance::upscale(j.crop,enhance::Method(j.method),ow,oh);
+        ok=j.result.width==ow;
+        if(ok){
+            mkdir("sdmc:/sm64ds/cache",0777);
+            char tmp[104];std::snprintf(tmp,sizeof tmp,"%s.tmp",path);
+            if(FILE* f=std::fopen(tmp,"wb")){
+                const uint32_t hdr[4]={0x4f474f4cu,uint32_t(ow),uint32_t(oh),j.method};
+                const bool written=std::fwrite(hdr,4,4,f)==4 && std::fwrite(j.result.px.data(),4,j.result.px.size(),f)==j.result.px.size();
+                std::fclose(f);
+                if(written){std::remove(path);std::rename(tmp,path);}else std::remove(tmp);
+            }
+        }
+    }
+    j.ms=double(svcGetSystemTick()-t0)/double(SYSCLOCK_ARM11/1000);
+    j.state.store(ok?2:3,std::memory_order_release);
+}
+static bool start_job(const enhance::Image& crop,enhance::Rect rect,uint8_t method,uint64_t key){
+    if(g_job.state.load(std::memory_order_acquire)==1)return false;
+    g_job.crop=crop;g_job.rect=rect;g_job.method=method;g_job.key=key;g_job.result=enhance::Image();g_job.from_cache=false;
+    g_job.state.store(1,std::memory_order_release);
+    // Lowest priority on the application core: only idle game-thread time.
+    if(!threadCreate(job_main,nullptr,64*1024,0x3f,-2,true)){g_job.state.store(3,std::memory_order_release);return false;}
+    return true;
+}
+// Worker, from prepare_layers (after FrameBegin). planes_changed: the BG
+// planes differ from the previous frame's. fg_mask: BG layers in the plane.
+static void update(const ntr::PpuPreparedCandidates& c,bool planes_changed,unsigned fg_mask){
+    g_drawable=false;
+    const auto& live=enhance::live();
+    if(!live.logo_hd.load(std::memory_order_relaxed)){g_stable=0;return;}
+    // One BG layer only (the logo); anything else keeps the DS plane.
+    unsigned layer=8;for(unsigned l=0;l<4;++l)if(fg_mask==(1u<<l))layer=l;
+    if(layer==8){g_stable=0;g_current_valid=false;return;}
+    const int state=g_job.state.load(std::memory_order_acquire);
+    if(state==2 || state==3){
+        if(state==2){
+            if(!g_tex_ok && !g_tex_failed){
+                if(C3D_TexInit(&g_tex,512,256,GPU_RGBA8)){
+                    C3D_TexSetFilter(&g_tex,GPU_LINEAR,GPU_LINEAR);
+                    // Texels outside the image are transparent (to_pica_rgba8 clears them).
+                    C3D_TexSetWrap(&g_tex,GPU_CLAMP_TO_EDGE,GPU_CLAMP_TO_EDGE);
+                    g_tex_ok=true;
+                }else{g_tex_failed=true;std::printf("HD logo texture unavailable (linear free=%u)\n",unsigned(linearSpaceFree()));}
+            }
+            if(g_tex_ok && g_job.result.width<=512 && g_job.result.height<=256){
+                enhance::to_pica_rgba8(g_job.result,static_cast<uint32_t*>(g_tex.data),512,256);
+                C3D_TexFlush(&g_tex);
+                g_tex_valid=true;g_tex_key=g_job.key;g_tex_rect=g_job.rect;g_tex_w=g_job.result.width;g_tex_h=g_job.result.height;
+            }
+            std::printf("HD logo ready: method=%s %dx%d at DS %d,%d %s %.1f ms (background)\n",enhance::method_name(enhance::Method(g_job.method)),
+                g_job.result.width,g_job.result.height,g_job.rect.x0,g_job.rect.y0,g_job.from_cache?"SD cache":"upscaled",g_job.ms);
+        }else std::printf("HD logo generation failed\n");
+        g_job.result=enhance::Image();g_job.crop=enhance::Image();
+        g_job.state.store(0,std::memory_order_release);
+    }
+    const uint8_t method=live.logo_method.load(std::memory_order_relaxed);
+    if(planes_changed || layer!=g_layer || method!=g_method){g_stable=0;g_current_valid=false;g_layer=layer;g_method=method;}
+    else if(g_stable<kHdStable-1)++g_stable;
+    if(g_stable==kHdStable-1 && g_job.state.load(std::memory_order_acquire)!=1){
+        // Stable for a few frames (and no generation running): extract the
+        // layer from the BG-only planes.
+        const uint8_t* fl=c.front_layer();
+        if(!fl || !c.background_identity)return;
+        enhance::Image full(256,192,0);
+        enhance::Rect r{256,192,0,0};
+        const uint32_t* front=&c.front.px[0][0];
+        for(int y=0;y<192;++y)for(int x=0;x<256;++x){
+            const int i=y*256+x;
+            if((fl[i]&7u)!=layer)continue;
+            full.px[size_t(i)]=front[i]|0xff000000u;
+            r.x0=std::min(r.x0,x);r.y0=std::min(r.y0,y);r.x1=std::max(r.x1,x+1);r.y1=std::max(r.y1,y+1);
+        }
+        if(r.empty() || r.w()*5/4>512 || r.h()*5/4>256){g_stable=kHdStable;return;}
+        const enhance::Rect al=enhance::align4(r);
+        enhance::Image crop(al.w(),al.h());
+        for(int y=0;y<al.h();++y)for(int x=0;x<al.w();++x)crop.px[size_t(y)*al.w()+x]=full.px[size_t(al.y0+y)*256+al.x0+x];
+        const uint64_t key=enhance::content_hash(crop)^(uint64_t(method)*0x9e3779b97f4a7c15ull);
+        g_current_key=key;g_current_rect=al;g_current_valid=true;
+        if(!(g_tex_valid && g_tex_key==key))start_job(crop,al,method,key);
+        ++g_stable;
+    }
+    g_drawable=g_current_valid && g_tex_valid && g_tex_key==g_current_key &&
+        g_tex_rect.x0==g_current_rect.x0 && g_tex_rect.y0==g_current_rect.y0;
+}
+// HD quad for one eye: LCD rect of the crop at 1.25x, shifted by the BG
+// plane disparity (pixels). Caller binds the pass-through program.
+static V3dsVert* g_hd_vertices;
+static bool quads(float shift_left,float shift_right){
+    if(!g_hd_vertices)g_hd_vertices=static_cast<V3dsVert*>(linearAlloc(12*sizeof(V3dsVert)));
+    if(!g_hd_vertices)return false;
+    const float lx=40.f+1.25f*g_tex_rect.x0,ly=1.25f*g_tex_rect.y0;
+    const float u1=g_tex_w/512.f,v1=g_tex_h/256.f;
+    for(unsigned eye=0;eye<2;++eye){
+        const float x0=(lx+(eye?shift_right:shift_left))/200.f-1,x1=x0+g_tex_w/200.f,y0=1-ly/120.f,y1=y0-g_tex_h/120.f;
+        const V3dsVert q[4]={{x0,y0,0,1,1,1,1,1,0,0},{x1,y0,0,1,1,1,1,1,u1,0},{x1,y1,0,1,1,1,1,1,u1,v1},{x0,y1,0,1,1,1,1,1,0,v1}};
+        const unsigned indices[]={0,1,2,0,2,3};for(unsigned i=0;i<6;++i)g_hd_vertices[eye*6+i]=q[indices[i]];
+    }
+    GSPGPU_FlushDataCache(g_hd_vertices,12*sizeof(V3dsVert));
+    return true;
+}
+static void release(){
+    if(g_tex_ok){defer_release(nullptr,&g_tex);g_tex_ok=false;}
+    g_tex_valid=false;g_current_valid=false;g_stable=0;g_drawable=false;
+}
+}
 // Worker, right after prepare_extension (same frame, after FrameBegin: the
 // previous frame no longer samples the textures). Decides whether this frame's
 // upper panel is presented as layered stereo.
 static void prepare_layers(const ntr::PpuPreparedCandidates& c,float slider,bool objects){
     g_layer_frame=false;
-    if(!(slider>0.f) || !layer_option() || !g_ext_valid || c.state.has_geometry || !c.background_identity)return;
+    // visual-enhancements: the HD logo uses this layered path in mono too.
+    const bool hd_mono=!(slider>0.f) && enhance::live().logo_hd.load(std::memory_order_relaxed) && sharp();
+    if(!hd_mono)hdlogo::g_drawable=false;
+    if(!(slider>0.f || hd_mono) || (!hd_mono && !layer_option()) || !g_ext_valid || c.state.has_geometry || !c.background_identity)return;
     const uint8_t* fl=c.front_layer();const uint8_t* bl=c.back_layer();
     if(!fl || !bl)return;
     const unsigned layer=g_ext_key.layer;
@@ -904,6 +1070,17 @@ static void prepare_layers(const ntr::PpuPreparedCandidates& c,float slider,bool
     if(!layers_init())return;
     const bool same=g_layer_have_key && g_layer_key.identity==c.background_identity &&
         g_layer_key.generation==c.background_generation && g_layer_key.front==&c.front.px[0][0] && g_layer_key.layer==layer;
+    if(hd_mono){
+        // visual-enhancements: in mono the planes are only needed once the
+        // logo is stable (HD drawable); skip the CPU plane builds while the BG
+        // planes change every frame (title logo scrolling in).
+        static ExtKey previous{};static unsigned steady=0;
+        const ExtKey now{c.background_identity,c.background_generation,&c.front.px[0][0],uint8_t(layer)};
+        steady=(previous.identity==now.identity && previous.generation==now.generation &&
+                previous.front==now.front && previous.layer==now.layer)?steady+1:0;
+        previous=now;
+        if(!same && steady<3){hdlogo::update(c,true,g_layer_fg_mask);hdlogo::g_drawable=false;return;}
+    }
     {   // Frontmost priority among the drawn BG layers (768 samples): OBJ at
         // or below it are in front of the logo.
         const uint8_t* fp=c.front_priority();unsigned best=4;
@@ -1015,6 +1192,8 @@ static void prepare_layers(const ntr::PpuPreparedCandidates& c,float slider,bool
     const bool effect=(mode==2 || mode==3) && (st.blend&g_layer_fg_mask);
     g_fg_up=mode==2;g_fg_factor=effect?std::min(16u,unsigned(st.brightness)):0;
     g_fg_master_up=master_mode==1;g_fg_master_factor=(master_mode==1 || master_mode==2)?std::min(16u,unsigned(st.master&31)):0;
+    hdlogo::update(c,!same,g_layer_fg_mask);
+    if(hd_mono && !hdlogo::g_drawable)return; // mono: layered only to show the HD logo
     g_layer_frame=true;
     if(++g_layer_frames%300==1)std::printf("Stereo menu layers frames=%llu planeChanges=%llu skyBuilds=%llu cpuPlaneBuilds=%llu buildMsTotal=%.3f flushMsTotal=%.3f sky=%u bg=%x slider=%.2f\n",
         (unsigned long long)g_layer_frames,(unsigned long long)g_layer_builds,(unsigned long long)g_layer_sky_builds,(unsigned long long)g_layer_fg_builds,
@@ -1207,6 +1386,18 @@ static void sprite_quads(float slider,bool sliced){
 // front of it, other OBJ.
 static void draw_layered(C3D_RenderTarget* const targets[3],C3D_Tex* panel,C3D_Tex* sprites){
     layer_vertices(g_layer_frame_slider);
+    // visual-enhancements: mono HD-logo frames draw eye 0 only.
+    const unsigned eyes=g_layer_frame_slider>0.f?2u:1u;
+    const bool hd=hdlogo::g_drawable && hdlogo::quads(-.5f*g_layer_frame_slider*layer_depths().bg,.5f*g_layer_frame_slider*layer_depths().bg);
+    // HD logo (1.25x texture, alpha-blended, same DS brightness lerps as the plane).
+    auto hd_pass=[&](unsigned eye){
+        layer_buffer(hdlogo::g_hd_vertices);
+        C3D_AlphaBlend(GPU_BLEND_ADD,GPU_BLEND_ADD,GPU_SRC_ALPHA,GPU_ONE_MINUS_SRC_ALPHA,GPU_ZERO,GPU_ONE);
+        lerp_env(g_fg_factor,g_fg_up,g_fg_master_factor,g_fg_master_up);
+        C3D_TexBind(0,&hdlogo::g_tex);C3D_DrawArrays(GPU_TRIANGLES,6*eye,6);
+        lerp_env(0,false,0,false);
+        C3D_AlphaBlend(GPU_BLEND_ADD,GPU_BLEND_ADD,GPU_ONE,GPU_ZERO,GPU_ONE,GPU_ZERO);
+    };
     auto identity_fix=[](){
         set_fix(1,0,1,false);
         C3D_FVUnifSet(GPU_VERTEX_SHADER,g_u_fix+0,1.f,0.f,0.f,0.f);
@@ -1238,15 +1429,18 @@ static void draw_layered(C3D_RenderTarget* const targets[3],C3D_Tex* panel,C3D_T
     if(!sharp()){
         // Nearest presentation (no sharp intermediate): same planes, sampled
         // directly from the textures and the resident panels.
-        for(unsigned eye=0;eye<2;++eye){
+        for(unsigned eye=0;eye<eyes;++eye){
             sky(eye);
             sprite_pass(eye,false);
+            if(hd)hd_pass(eye);
+            else{
             layer_buffer(g_layer_vertices);
             C3D_AlphaTest(true,GPU_GREATER,127);
             lerp_env(g_fg_factor,g_fg_up,g_fg_master_factor,g_fg_master_up);
             C3D_TexBind(0,&g_layer_fg);C3D_DrawArrays(GPU_TRIANGLES,168+6*eye,6);
             lerp_env(0,false,0,false);
             C3D_AlphaTest(false,GPU_ALWAYS,0);
+            }
             sprite_pass(eye,true);
             layer_buffer(g_layer_vertices);
             C3D_AlphaTest(true,GPU_GREATER,127);
@@ -1269,25 +1463,26 @@ static void draw_layered(C3D_RenderTarget* const targets[3],C3D_Tex* panel,C3D_T
     bool sky_done=false;
     if(g_layer_back_sprites){
         fill(sprites,72,false);
-        for(unsigned eye=0;eye<2;++eye){sky(eye);sprite_pass(eye,false);}
+        for(unsigned eye=0;eye<eyes;++eye){sky(eye);sprite_pass(eye,false);}
         sky_done=true;
     }
-    fill(&g_layer_fg,108,true);
-    for(unsigned eye=0;eye<2;++eye){
+    if(!hd)fill(&g_layer_fg,108,true);
+    for(unsigned eye=0;eye<eyes;++eye){
         if(!sky_done)sky(eye);
         else{C3D_FrameDrawOn(targets[eye]);set_fix(1,0,1,false);}
+        if(hd){hd_pass(eye);continue;}
         layer_buffer(g_layer_vertices);C3D_AlphaTest(true,GPU_GREATER,127);
         for(unsigned k=0;k<kSlices;++k){C3D_TexBind(0,&g_slice_tex[k]);C3D_DrawArrays(GPU_TRIANGLES,24+36*eye+6*k,6);}
         C3D_AlphaTest(false,GPU_ALWAYS,0);
     }
     if(g_layer_front_sprites){
         fill(sprites,72,false);
-        for(unsigned eye=0;eye<2;++eye){C3D_FrameDrawOn(targets[eye]);set_fix(1,0,1,false);sprite_pass(eye,true);}
+        for(unsigned eye=0;eye<eyes;++eye){C3D_FrameDrawOn(targets[eye]);set_fix(1,0,1,false);sprite_pass(eye,true);}
     }
     // Composed panel (OBJ pixels outside the sprite boxes carry alpha 255).
     fill(panel,72,false);
     layer_buffer(g_layer_vertices);
-    for(unsigned eye=0;eye<2;++eye){
+    for(unsigned eye=0;eye<eyes;++eye){
         C3D_FrameDrawOn(targets[eye]);set_fix(1,0,1,false);
         C3D_AlphaTest(true,GPU_GREATER,127);
         for(unsigned k=0;k<kSlices;++k){C3D_TexBind(0,&g_slice_tex[k]);C3D_DrawArrays(GPU_TRIANGLES,96+36*eye+6*k,6);}
@@ -1296,6 +1491,7 @@ static void draw_layered(C3D_RenderTarget* const targets[3],C3D_Tex* panel,C3D_T
     layer_buffer(g_vertices);
 }
 static void layers_release(){
+    hdlogo::release(); // visual-enhancements
     if(g_layer_ready){defer_release(nullptr,&g_layer_sky);defer_release(nullptr,&g_layer_fg);g_layer_ready=false;}
     g_layer_failed=false;g_layer_have_key=false;g_layer_frame=false;g_layer_slider=-1.f;g_layer_sky_valid=false;g_layer_fg_valid=false;
 }
@@ -1306,19 +1502,59 @@ static void layers_release(){
 // C3D_FrameBegin; the current frame does not use these targets. Deleting a
 // render target inside a frame is a citro3d panic (svcBreak), so they are
 // queued and freed after this frame's C3D_FrameEnd (defer_release).
-static void release(){
-    if(g_sharp_ok){
-        for(unsigned k=0;k<kSlices;++k){defer_release(g_slice_target[k],&g_slice_tex[k]);g_slice_target[k]=nullptr;}
-        g_sharp_ok=false;
-    }
+static void release_extras(){
     if(g_ext_ready){
         if(g_ext2_ok){defer_release(g_ext2_target,&g_ext2_tex);g_ext2_target=nullptr;g_ext2_ok=false;}
         defer_release(nullptr,&g_ext_tex);g_ext_ready=false;
     }
     g_ext_failed=false;g_ext_have_key=false;g_ext_valid=false;
     layers_release(); // menu-stereo
+}
+static void release(){
+    if(g_sharp_ok){
+        for(unsigned k=0;k<kSlices;++k){defer_release(g_slice_target[k],&g_slice_tex[k]);g_slice_target[k]=nullptr;}
+        g_sharp_ok=false;
+    }
+    release_extras();
     g_ready=false;g_failed=false;
     std::printf("Screen layout resources released (deferred to frame end) VRAM free=%u\n",unsigned(vramSpaceFree()));
+}
+// visual-enhancements: in-game "sharp" presentation of the upper screen
+// (settings: Écran du haut en jeu = Lissé net). Same two passes as the menu
+// layout (nearest x2 into the six 512x64 slices, then bilinear) but onto the
+// full 400-pixel width, keeping today's stretch. Off by default: today's
+// nearest stretch, bit-identical. Costs one 512x384 + one 400x240 textured
+// pass per upper panel (per eye) and the slices' 768 KiB of VRAM while on;
+// when VRAM is short the nearest stretch stays and a retry follows ~10 s later.
+static bool game_sharp_wanted(){return enhance::live().gameplay_filter.load(std::memory_order_relaxed)==1;}
+static unsigned g_game_retry=0;
+static bool g_game_active=false;
+static bool draw_game_top(C3D_Tex* const sources[3],C3D_RenderTarget* const targets[3],bool stereo,bool resident){
+    if(ds_layout() || !game_sharp_wanted()){g_game_active=false;return false;}
+    if(g_game_retry){--g_game_retry;return false;}
+    if(!init() || !sharp()){
+        release();g_game_retry=600;
+        std::printf("In-game sharp filter unavailable (VRAM free=%u): nearest stretch, retry later\n",unsigned(vramSpaceFree()));
+        return false;
+    }
+    if(!g_game_active){g_game_active=true;std::printf("In-game sharp filter active VRAM free=%u\n",unsigned(vramSpaceFree()));}
+    auto* buffers=C3D_GetBufInfo();BufInfo_Init(buffers);
+    BufInfo_Add(buffers,g_vertices,sizeof(V3dsVert),3,0x210);
+    for(unsigned panel=0;panel<2;++panel){
+        if(panel==1 && !stereo)continue;
+        set_fix(1,0,1,false);
+        C3D_FVUnifSet(GPU_VERTEX_SHADER,g_u_fix+0,1.f,0.f,0.f,0.f);
+        C3D_FVUnifSet(GPU_VERTEX_SHADER,g_u_fix+1,0.f,1.f,0.f,0.f);
+        C3D_TexBind(0,sources[panel]);
+        for(unsigned k=0;k<kSlices;++k){
+            C3D_FrameDrawOn(g_slice_target[k]);C3D_SetViewport(0,0,512,64);
+            C3D_DrawArrays(GPU_TRIANGLES,(resident?72:108)+6*k,6);
+        }
+        C3D_RenderTargetClear(targets[panel],C3D_CLEAR_ALL,0,0);C3D_FrameDrawOn(targets[panel]);
+        set_fix(1,0,1,false);
+        for(unsigned k=0;k<kSlices;++k){C3D_TexBind(0,&g_slice_tex[k]);C3D_DrawArrays(GPU_TRIANGLES,180+6*k,6);}
+    }
+    return true;
 }
 static bool draw(C3D_RenderTarget* const targets[3],C3D_Tex* const sources[3],bool stereo,bool resident){
     const bool layout=ds_layout(),ready=layout && init();
@@ -1328,7 +1564,11 @@ static bool draw(C3D_RenderTarget* const targets[3],C3D_Tex* const sources[3],bo
             state==2?"DS 4:3 + sky":state==1?"STRETCHED (DS layout resources unavailable)":"stretched",
             unsigned(g_menu_presentation.load(std::memory_order_relaxed)),unsigned(g_ready),unsigned(g_failed),unsigned(resident));}
     }
-    if(!layout && (g_ready || g_ext_ready))release();
+    if(!layout && (g_ready || g_ext_ready)){
+        // visual-enhancements: the in-game sharp filter keeps the slices.
+        if(game_sharp_wanted() && g_ready && g_sharp_ok && !g_game_retry){if(g_ext_ready)release_extras();}
+        else release();
+    }
     if(!ready)return false;
     auto* buffers=C3D_GetBufInfo();BufInfo_Init(buffers);
     BufInfo_Add(buffers,g_vertices,sizeof(V3dsVert),3,0x210);
@@ -1367,6 +1607,84 @@ static bool draw(C3D_RenderTarget* const targets[3],C3D_Tex* const sources[3],bo
         }
     }
     return true;
+}
+}
+
+// ---- visual-enhancements: settings screen + FPS strip on the lower LCD -------
+// Drawn last in the frame over the lower target (inside the frame, after
+// FrameBegin drained the previous GPU work, so rewriting the linear
+// textures is safe). Images come from the game thread (enhance_runtime) and
+// are re-tiled only when their generation changes (key presses, ~2x/s for
+// the FPS strip). Nothing is allocated or drawn while both are hidden:
+// default output unchanged.
+namespace enhance_draw {
+static C3D_Tex g_tex[2];
+static bool g_tex_ok[2],g_tex_failed[2];
+static uint32_t g_uploaded[2];
+static V3dsVert* g_quads;
+static void tile(uint32_t* dst,unsigned tw,unsigned th,const uint32_t* img,unsigned w,unsigned h){
+    for(unsigned y=0;y<h;++y){
+        const unsigned py=th-1-y;
+        const uint32_t* row=img+y*w;
+        for(unsigned x=0;x<w;++x){
+            const uint32_t c=row[x];
+            dst[((py>>3)*(tw>>3)+(x>>3))*64+morton8(x&7,py&7)]=(c<<8)|(c>>24);
+        }
+    }
+}
+static void bottom(C3D_RenderTarget* target){
+    if(!target)return;
+    const uint32_t* images[2]={};uint32_t generations[2]={};int widths[2]={},heights[2]={};
+    bool any=false;
+    for(unsigned kind=0;kind<2;++kind){
+        images[kind]=enhance_runtime::overlay_image(kind,generations[kind],widths[kind],heights[kind]);
+        any|=images[kind]!=nullptr;
+    }
+    if(!any)return;
+    if(!g_quads){
+        g_quads=static_cast<V3dsVert*>(linearAlloc(12*sizeof(V3dsVert)));
+        if(!g_quads)return;
+        auto quad=[](V3dsVert* out,float x0,float y0,float x1,float y1,float u1,float v1){
+            const V3dsVert q[4]={{x0,y0,0,1,1,1,1,1,0,0},{x1,y0,0,1,1,1,1,1,u1,0},{x1,y1,0,1,1,1,1,1,u1,v1},{x0,y1,0,1,1,1,1,1,0,v1}};
+            const unsigned indices[]={0,1,2,0,2,3};for(unsigned i=0;i<6;++i)out[i]=q[indices[i]];
+        };
+        // settings screen: whole 320x240 LCD; FPS strip: LCD (4,4)-(260,20).
+        quad(g_quads,-1,1,1,-1,320.f/512.f,240.f/256.f);
+        quad(g_quads+6,-1+8.f/320.f,1-8.f/240.f,-1+520.f/320.f,1-40.f/240.f,1.f,1.f);
+        GSPGPU_FlushDataCache(g_quads,12*sizeof(V3dsVert));
+    }
+    shader_bind(false);C3D_SetAttrInfo(&g_attr);set_fix(1,0,1,false);
+    C3D_CullFace(GPU_CULL_NONE);C3D_StencilTest(false,GPU_ALWAYS,0,0xff,0xff);
+    C3D_DepthTest(false,GPU_ALWAYS,GPU_WRITE_COLOR);C3D_AlphaTest(false,GPU_ALWAYS,0);
+    for(unsigned stage=0;stage<6;++stage)C3D_TexEnvInit(C3D_GetTexEnv(stage));
+    auto* env=C3D_GetTexEnv(0);
+    C3D_TexEnvSrc(env,C3D_Both,GPU_TEXTURE0,GPU_PRIMARY_COLOR,GPU_PRIMARY_COLOR);
+    C3D_TexEnvFunc(env,C3D_Both,GPU_REPLACE);
+    auto* buffers=C3D_GetBufInfo();BufInfo_Init(buffers);
+    BufInfo_Add(buffers,g_quads,sizeof(V3dsVert),3,0x210);
+    C3D_FrameDrawOn(target);
+    for(unsigned kind=0;kind<2;++kind){
+        if(!images[kind])continue;
+        const unsigned tw=kind?256:512,th=kind?16:256;
+        if(!g_tex_ok[kind]){
+            if(g_tex_failed[kind])continue;
+            if(!C3D_TexInit(&g_tex[kind],tw,th,GPU_RGBA8)){g_tex_failed[kind]=true;
+                std::printf("Settings overlay texture %u unavailable (linear free=%u)\n",kind,unsigned(linearSpaceFree()));continue;}
+            C3D_TexSetFilter(&g_tex[kind],GPU_NEAREST,GPU_NEAREST);
+            C3D_TexSetWrap(&g_tex[kind],GPU_CLAMP_TO_EDGE,GPU_CLAMP_TO_EDGE);
+            g_tex_ok[kind]=true;g_uploaded[kind]=0;
+        }
+        if(generations[kind]!=g_uploaded[kind]){
+            tile(static_cast<uint32_t*>(g_tex[kind].data),tw,th,images[kind],unsigned(widths[kind]),unsigned(heights[kind]));
+            C3D_TexFlush(&g_tex[kind]);
+            g_uploaded[kind]=generations[kind];
+            enhance_runtime::acknowledge(kind,generations[kind]);
+        }
+        if(kind)C3D_AlphaBlend(GPU_BLEND_ADD,GPU_BLEND_ADD,GPU_SRC_ALPHA,GPU_ONE_MINUS_SRC_ALPHA,GPU_ZERO,GPU_ONE);
+        else C3D_AlphaBlend(GPU_BLEND_ADD,GPU_BLEND_ADD,GPU_ONE,GPU_ZERO,GPU_ONE,GPU_ZERO);
+        C3D_TexBind(0,&g_tex[kind]);C3D_DrawArrays(GPU_TRIANGLES,6*kind,6);
+    }
+    C3D_AlphaBlend(GPU_BLEND_ADD,GPU_BLEND_ADD,GPU_ONE,GPU_ZERO,GPU_ONE,GPU_ZERO);
 }
 }
 
@@ -1466,6 +1784,39 @@ static bool mixed_defer_initial_palette(){
  static const bool enabled=[](){const char* option=std::getenv("PLAYER_MIXED_DEFER_INITIAL_PALETTE");return option&&std::atoi(option)!=0;}();return enabled;
 }
 static bool gpugeo_draw=false; // this gpu_frame draws a GPU geometry mode frame
+// ingame-stereo: per-draw eye replication into the stacked resident target.
+// eye_y: viewport origin of each 256x256 half (view 0 = first half of the
+// texture memory). When g_eye.on, every geometry draw (and every full-screen
+// stencil/alpha quad) is issued once per eye with that eye's viewport,
+// scissor and stereo uniform, after the batch state was set once: per eye
+// the pass sequence (stencil/depth state, clears) is exactly the mono one.
+// Asymmetric comfort clamp without touching the shaders: the shader clamps
+// its parallax term symmetrically to +-stereo.w; with half-range c=(a+b)/2,
+// an extra per-eye NDC shift d=(b-a)/2 (fix row 0, w column) and convergence
+// conv*b/c, the parallax law stays b*(1-conv/w) but is limited to [-a,+b]:
+// b = depth at infinity (behind the screen), a = maximum pop-out.
+struct EyeReplication{bool on=false,perspective=true;float sep=0.f,conv=1.f,half=0.f,shift=0.f,clamp_conv=1.f;};
+static EyeReplication g_eye;
+static double g_last_draw_ms=0; // CPU time of the last draw_batches (stereo_budget)
+static constexpr int kEyeY[2]={256,0};
+static void eye_select(unsigned eye){
+    C3D_SetViewport(0,kEyeY[eye],256,192);
+    if(!g_eye.on)return;
+    C3D_SetScissor(GPU_SCISSOR_NORMAL,0,kEyeY[eye],256,kEyeY[eye]+192);
+    const float sign=eye?1.f:-1.f;
+    if(g_eye.perspective){
+        const float c=sign*g_eye.half;
+        C3D_FVUnifSet(GPU_VERTEX_SHADER,g_u_stereo,c,-c*g_eye.clamp_conv,0.f,g_eye.half);
+        C3D_FVUnifSet(GPU_VERTEX_SHADER,g_u_fix+0,1.f,0.f,0.f,sign*g_eye.shift);
+    }else{
+        const float s=sign*g_eye.sep;
+        C3D_FVUnifSet(GPU_VERTEX_SHADER,g_u_stereo,0.f,0.f,s,s<0?-s:s);
+    }
+}
+template<class F> static void each_eye(F&& draw){
+    if(!g_eye.on){draw();return;}
+    for(unsigned eye=0;eye<2;++eye){eye_select(eye);draw();}
+}
 static void draw_batches(const V3dsVert *verts, int nverts, const V3dsBatch *b, int nb, V3dsVert *vbo, bool native, const ds_shadow::FramePlan* shadow_plan=nullptr)
 {
     UnifiedDrawScope unified_scope;
@@ -1506,6 +1857,17 @@ static void draw_batches(const V3dsVert *verts, int nverts, const V3dsBatch *b, 
             if (!cached) continue;
             C3D_Tex *t = &cached->tex;
             C3D_TexSetWrap(t, wrap_mode(b[i].wrap & 1, b[i].wrap & 4), wrap_mode(b[i].wrap & 2, b[i].wrap & 8));
+            {   // visual-enhancements: "Filtrage des textures". 0 = DS nearest
+                // (default, untouched), 1 = bilinear except cut-out textures
+                // (alpha-0 texels: bilinear would fringe their edges), 2 = all.
+                static bool touched=false;
+                const unsigned policy=enhance::live().tex_filter.load(std::memory_order_relaxed);
+                if(policy)touched=true;
+                if(touched){
+                    const GPU_TEXTURE_FILTER_PARAM f=(policy==2 || (policy==1 && !cached->has_zero_alpha))?GPU_LINEAR:GPU_NEAREST;
+                    C3D_TexSetFilter(t,f,f);
+                }
+            }
             C3D_TexBind(0, t);
             C3D_TexEnvSrc(env, C3D_Both, GPU_TEXTURE0, GPU_PRIMARY_COLOR, GPU_PRIMARY_COLOR);
             C3D_TexEnvFunc(env, C3D_RGB, GPU_MODULATE);
@@ -1523,15 +1885,17 @@ static void draw_batches(const V3dsVert *verts, int nverts, const V3dsBatch *b, 
         if (!pa) continue; // alpha-zero wireframe is not implemented by this renderer
         const bool partial = b[i].tex ? g_batch_textures[i]->has_partial_alpha : pa < 31;
         const bool write_translucent_depth = (b[i].polygon_attr & (1u << 11)) != 0;
+        // ingame-stereo: per draw, the state is bound once and only the draw
+        // call itself is replicated per eye (each_eye).
         auto draw=[&](){if(mesh_active&&mixed_frame){
             // EACH original alpha/stencil pass traverses the same ordered span.
             // Shader switches never rerun material/shadow state setup.
             const auto& span=mixed_frame->run_spans.at(i);
             for(unsigned j=span.first;j<span.first+span.count;++j){const auto& d=mixed_frame->draws[j];
-                if(d.stream==mixed_clip::Stream::NativeIndexed){mesh_bind_batch(i);mesh_buffers();C3D_DrawElements(GPU_TRIANGLES,d.count,C3D_UNSIGNED_SHORT,mesh_indices+d.first);++mesh_stats.draws;++mixed_native_draws;}
-                else{shader_bind(false);C3D_SetAttrInfo(&g_attr);auto* buffers=C3D_GetBufInfo();BufInfo_Init(buffers);BufInfo_Add(buffers,mixed_cpu,sizeof(V3dsVert),3,0x210);C3D_DrawArrays(GPU_TRIANGLES,d.first,d.count);++mixed_cpu_draws;}
+                if(d.stream==mixed_clip::Stream::NativeIndexed){mesh_bind_batch(i);mesh_buffers();each_eye([&](){C3D_DrawElements(GPU_TRIANGLES,d.count,C3D_UNSIGNED_SHORT,mesh_indices+d.first);});++mesh_stats.draws;++mixed_native_draws;}
+                else{shader_bind(false);C3D_SetAttrInfo(&g_attr);auto* buffers=C3D_GetBufInfo();BufInfo_Init(buffers);BufInfo_Add(buffers,mixed_cpu,sizeof(V3dsVert),3,0x210);each_eye([&](){C3D_DrawArrays(GPU_TRIANGLES,d.first,d.count);});++mixed_cpu_draws;}
             }
-        }else if(mesh_active){C3D_DrawElements(GPU_TRIANGLES,b[i].count,C3D_UNSIGNED_SHORT,mesh_indices+b[i].first);++mesh_stats.draws;}else if(gpugeo_draw)gpugeo::draw_batch(b[i],i);else C3D_DrawArrays(GPU_TRIANGLES,b[i].first,b[i].count);};
+        }else if(mesh_active){each_eye([&](){C3D_DrawElements(GPU_TRIANGLES,b[i].count,C3D_UNSIGNED_SHORT,mesh_indices+b[i].first);});++mesh_stats.draws;}else if(gpugeo_draw)each_eye([&](){gpugeo::draw_batch(b[i],i);});else each_eye([&](){C3D_DrawArrays(GPU_TRIANGLES,b[i].first,b[i].count);});};
         if(shadow_plan){
             auto operation=[](ds_shadow::Op op)->GPU_STENCILOP{
                 switch(op){case ds_shadow::Op::Zero:return GPU_STENCIL_ZERO;case ds_shadow::Op::Replace:return GPU_STENCIL_REPLACE;
@@ -1556,7 +1920,7 @@ static void draw_batches(const V3dsVert *verts, int nverts, const V3dsBatch *b, 
                     // leaves the previous VBO bound after a draw.
                     C3D_CullFace(GPU_CULL_NONE);bi=C3D_GetBufInfo();BufInfo_Init(bi);BufInfo_Add(bi,g_shadow_clear,sizeof(V3dsVert),3,0x210);
                     if(mesh_active){shader_bind(false);C3D_SetAttrInfo(&g_attr);}
-                    C3D_DrawArrays(GPU_TRIANGLES,0,6);
+                    each_eye([&](){C3D_DrawArrays(GPU_TRIANGLES,0,6);});
                     bi=C3D_GetBufInfo();BufInfo_Init(bi);BufInfo_Add(bi,vbo,sizeof(V3dsVert),3,0x210);
                     if(mesh_active){mesh_bind_batch(i);mesh_buffers();}
                     C3D_CullFace(faces==0xc0?GPU_CULL_NONE:back_ccw?GPU_CULL_BACK_CCW:GPU_CULL_FRONT_CCW);
@@ -1575,7 +1939,7 @@ static void draw_batches(const V3dsVert *verts, int nverts, const V3dsBatch *b, 
                 C3D_CullFace(GPU_CULL_NONE);
                 shader_bind(false);C3D_SetAttrInfo(&g_attr);
                 bi=C3D_GetBufInfo();BufInfo_Init(bi);BufInfo_Add(bi,g_shadow_clear,sizeof(V3dsVert),3,0x210);
-                C3D_DrawArrays(GPU_TRIANGLES,0,6);
+                each_eye([&](){C3D_DrawArrays(GPU_TRIANGLES,0,6);});
                 bi=C3D_GetBufInfo();BufInfo_Init(bi);BufInfo_Add(bi,vbo,sizeof(V3dsVert),3,0x210);
                 if(mesh_active){mesh_bind_batch(i);mesh_buffers();}
                 C3D_CullFace(faces==0xc0?GPU_CULL_NONE:back_ccw?GPU_CULL_BACK_CCW:GPU_CULL_FRONT_CCW);
@@ -1615,6 +1979,19 @@ static void draw_batches(const V3dsVert *verts, int nverts, const V3dsBatch *b, 
                 C3D_AlphaTest(true,partial?GPU_EQUAL:GPU_GREATER,partial?255:0);
                 C3D_DepthTest(true,GPU_GREATER,GPU_WRITE_ALL);
                 draw();
+                if(gpugeo_draw && !partial && gpugeo::highlight_batch(i)){ // (partial batches reuse stage 0 below)
+                    // DS highlight shading (face-toy, file-select castle): add
+                    // ToonTable[red] over the pixels this batch just wrote (same
+                    // vertices -> equal depth), RGB only, saturating like the DS.
+                    C3D_TexEnv* add=C3D_GetTexEnv(0);C3D_TexEnvInit(add);
+                    C3D_TexEnvSrc(add,C3D_Both,GPU_PRIMARY_COLOR,GPU_PRIMARY_COLOR,GPU_PRIMARY_COLOR);
+                    C3D_TexEnvFunc(add,C3D_Both,GPU_REPLACE);fog_stage(0);
+                    C3D_StencilTest(false,GPU_ALWAYS,0,0xff,0xff);C3D_AlphaTest(false,GPU_ALWAYS,0);
+                    C3D_DepthTest(true,GPU_EQUAL,static_cast<GPU_WRITEMASK>(GPU_WRITE_RED|GPU_WRITE_GREEN|GPU_WRITE_BLUE));
+                    C3D_AlphaBlend(GPU_BLEND_ADD,GPU_BLEND_ADD,GPU_ONE,GPU_ONE,GPU_ZERO,GPU_ONE);
+                    each_eye([&](){gpugeo::draw_batch(b[i],i,true);});
+                    fog_stage(b[i].polygon_attr);
+                }
             }
             if(partial && fog_flags) {
                 // Every pixel is occupied (opaque clear); bit 7 = fog flag F.
@@ -1682,7 +2059,7 @@ static void draw_batches(const V3dsVert *verts, int nverts, const V3dsBatch *b, 
         C3D_CullFace(GPU_CULL_NONE);
         shader_bind(false);C3D_SetAttrInfo(&g_attr);
         bi=C3D_GetBufInfo();BufInfo_Init(bi);BufInfo_Add(bi,g_shadow_clear,sizeof(V3dsVert),3,0x210);
-        C3D_DrawArrays(GPU_TRIANGLES,0,6);
+        each_eye([&](){C3D_DrawArrays(GPU_TRIANGLES,0,6);});
         g_shadow_marks=false;
     }
 }
@@ -1771,8 +2148,17 @@ static bool gpu_frame(const V3dsVert *verts, int nverts, const V3dsBatch *batche
         std::printf("Native readback targets created remainingVRAM=%u\n",vramSpaceFree());
     }
     if(read_native && (!g_native_left || !g_native_right || !g_native_readback || !native_right))return false;
-    const float sep = 0.03f * slider;        // clip-space units at w = 1
-    const float conv = convergence;
+    // ingame-stereo: DS-scene stereo (resident/native frames). The camera
+    // convergence is the w of the camera target (Mario); the zero-parallax
+    // plane sits slightly in front of it (SM64DS_STEREO_CONVERGENCE, default
+    // 0.8) so the world goes into the screen, Mario sits just behind the
+    // screen and only the closest geometry (floor at the bottom edge) pops
+    // out a little. SM64DS_STEREO_SEPARATION: eye shift at infinity in clip
+    // units per eye at full slider (0.03 = 6 LCD pixels per eye).
+    static const float stereo_sep=[](){const char* v=std::getenv("SM64DS_STEREO_SEPARATION");const float s=v?float(std::atof(v)):.03f;return s<0.f?0.f:s>.06f?.06f:s;}();
+    static const float stereo_conv=[](){const char* v=std::getenv("SM64DS_STEREO_CONVERGENCE");const float s=v?float(std::atof(v)):.8f;return s<.25f?.25f:s>2.f?2.f:s;}();
+    const float sep = (native?stereo_sep:0.03f) * slider;        // clip-space units at w = 1
+    const float conv = native?convergence*stereo_conv:convergence;
 
 #ifdef SM64DS_GPU_COMPOSITE_CANDIDATE
     const double wait_start=v3ds_time_ms();
@@ -1875,7 +2261,7 @@ static bool gpu_frame(const V3dsVert *verts, int nverts, const V3dsBatch *batche
     auto* left=native?g_native_left:g_left;
     auto* right=native?g_native_right:g_right;
 #ifdef SM64DS_GPU_COMPOSITE_CANDIDATE
-    if(resident){left=g_resident_geometry_target[0];right=g_resident_geometry_target[1];}
+    if(resident){left=g_resident_stacked?g_resident_stack_target:g_resident_geometry_target[0];right=g_resident_stacked?g_resident_stack_target:g_resident_geometry_target[1];}
 #endif
     const uint32_t clear_color=native?g_native_clear.rgba():CLEAR;
     const bool clear_fog_flags=native && g_fog_active && g_native_clear.alpha()==31;
@@ -1886,7 +2272,11 @@ static bool gpu_frame(const V3dsVert *verts, int nverts, const V3dsBatch *batche
     C3D_RenderTargetClear(left, C3D_CLEAR_ALL, clear_color, clear_depth);
     C3D_FrameDrawOn(left);
 #ifdef SM64DS_GPU_COMPOSITE_CANDIDATE
-    if(resident)C3D_SetViewport(0,0,256,192);
+    // Stacked: both eyes in this one pass (each_eye); mono uses view 0.
+    const bool stacked=resident && g_resident_stacked;
+    if(resident){if(stacked)eye_select(0);else C3D_SetViewport(0,0,256,192);}
+#else
+    const bool stacked=false;
 #endif
     set_fix(aspect_x, -sep, conv, perspective);
     if(native){
@@ -1899,8 +2289,21 @@ static bool gpu_frame(const V3dsVert *verts, int nverts, const V3dsBatch *batche
     const bool ds_snap=native && g_menu_presentation.load(std::memory_order_relaxed) && g_u_snap>=0 && snap_allowed;
     if(ds_snap)C3D_BoolUnifSet(GPU_VERTEX_SHADER,g_u_snap,true);
     if(mesh_active){shader_bind(true);C3D_SetAttrInfo(&mesh_attributes);}
+    if(stacked && slider>0.0f){
+        // SM64DS_STEREO_POPOUT: maximum pop-out per eye (clip units at full
+        // slider), default 0.01 = 2 LCD pixels per eye.
+        static const float popout=[](){const char* v=std::getenv("SM64DS_STEREO_POPOUT");const float s=v?float(std::atof(v)):.01f;return s<0.f?0.f:s;}();
+        const float b=sep,a=std::min(popout*slider,b);
+        g_eye.on=true;g_eye.sep=sep;g_eye.conv=conv;g_eye.perspective=perspective;
+        g_eye.half=.5f*(a+b);g_eye.shift=.5f*(b-a);g_eye.clamp_conv=g_eye.half>0.f?conv*b/g_eye.half:conv;
+        static bool logged=false;
+        if(!logged){logged=true;std::printf("Stereo in-game: per-eye geometry in one pass, depth +%.3f (infinity) / -%.3f (pop-out) clip units per eye, convergence x%.2f of the camera target\n",b,a,double(conv/std::max(convergence,1e-6f)));}
+    }
+    const double draw_started=v3ds_time_ms();
     draw_batches(verts, nverts, batches, nb, vbo, native, shadow_plan);
-    if (slider > 0.0f) {
+    g_last_draw_ms=v3ds_time_ms()-draw_started;
+    if(g_eye.on){g_eye.on=false;C3D_SetScissor(GPU_SCISSOR_DISABLE,0,0,0,0);}
+    if (slider > 0.0f && !stacked) {
         C3D_RenderTargetClear(right, C3D_CLEAR_ALL, clear_color, clear_depth);
         C3D_FrameDrawOn(right);
 #ifdef SM64DS_GPU_COMPOSITE_CANDIDATE
@@ -2015,6 +2418,12 @@ static bool resident_destroy(){
 #endif
     for(auto& compositor:g_resident_compositor)compositor.destroy();
     for(auto& panel:g_resident_panels)panel.destroy();
+    if(g_resident_stacked){
+        if(g_resident_stack_target)C3D_RenderTargetDelete(g_resident_stack_target);
+        if(g_resident_stack.data)C3D_TexDelete(&g_resident_stack);
+        g_resident_stack_target=nullptr;g_resident_stack={};g_resident_stacked=false;
+        for(unsigned eye=0;eye<2;++eye){g_resident_geometry[eye]={};g_resident_geometry_target[eye]=nullptr;}
+    }
     for(unsigned eye=0;eye<2;++eye){
         if(g_resident_geometry_target[eye])C3D_RenderTargetDelete(g_resident_geometry_target[eye]);
         g_resident_geometry_target[eye]=nullptr;
@@ -2032,7 +2441,23 @@ static bool resident_destroy(){
 static bool resident_init(){
     if(g_resident_ready)return true;
     const unsigned vram_before=vramSpaceFree(),linear_before=linearSpaceFree();
-    for(unsigned eye=0;eye<2;++eye){
+    static const bool stack_option=[](){const char* s=std::getenv("SM64DS_STEREO_STACK");return !(s&&s[0]=='0');}();
+    if(stack_option && C3D_TexInitVRAM(&g_resident_stack,256,512,GPU_RGBA8)){
+        C3D_TexSetFilter(&g_resident_stack,GPU_NEAREST,GPU_NEAREST);
+        C3D_TexSetWrap(&g_resident_stack,GPU_CLAMP_TO_EDGE,GPU_CLAMP_TO_EDGE);
+        g_resident_stack_target=C3D_RenderTargetCreateFromTex(&g_resident_stack,GPU_TEXFACE_2D,0,GPU_RB_DEPTH24_STENCIL8);
+        if(g_resident_stack_target){
+            for(unsigned eye=0;eye<2;++eye){
+                C3D_Tex view=g_resident_stack;view.height=256;view.size=256*256*4;
+                view.data=static_cast<uint8_t*>(g_resident_stack.data)+eye*256*256*4;
+                g_resident_geometry[eye]=view;g_resident_geometry_target[eye]=nullptr;
+            }
+            g_resident_stacked=true;
+            std::printf("Stereo geometry target stacked 256x512 (both eyes in one pass) VRAM free=%u\n",unsigned(vramSpaceFree()));
+        }else{C3D_TexDelete(&g_resident_stack);g_resident_stack={};}
+    }
+    if(!g_resident_stacked)std::printf("Stereo geometry target: two 256x256 targets (second eye drawn in a second pass)\n");
+    for(unsigned eye=0;eye<2 && !g_resident_stacked;++eye){
         auto& texture=g_resident_geometry[eye];
         if(!C3D_TexInitVRAM(&texture,256,256,GPU_RGBA8)){resident_destroy();return false;}
         C3D_TexSetFilter(&texture,GPU_NEAREST,GPU_NEAREST);
@@ -2089,6 +2514,38 @@ static bool resident_objects_init(unsigned engine){
 }
 #endif
 const char* g_present_refusal="";
+// ingame-stereo: frame-time governor. The second eye doubles the draw calls;
+// a scene with hundreds of tiny batches (door/star sparkle bursts) can push
+// the presentation worker past the 30 Hz budget. When a stereo frame's
+// presentation time exceeds SM64DS_STEREO_BUDGET_MS (default 26: the mesh
+// preparation before it also runs on the worker; two consecutive
+// frames, or one beyond 1.25x) AND dropping the
+// second eye's draws (~40% of the draw time) would bring it back under the
+// budget (so one-off loading spikes never flatten the image), the following
+// frames are presented mono until the mono time predicts a stereo frame back
+// under budget for 30 consecutive frames. Slider 0 never reaches this.
+namespace stereo_budget {
+static bool mono=false;static unsigned calm=0,slow=0;static uint64_t mono_frames=0,episodes=0;
+static float budget(){static const float b=[](){const char* v=std::getenv("SM64DS_STEREO_BUDGET_MS");const float f=v?float(std::atof(v)):26.f;return f<8.f?8.f:f;}();return b;}
+static bool mono_now(){if(mono)++mono_frames;return mono;}
+static void record(double ms,bool was_stereo,bool wanted){
+    if(!wanted){mono=false;calm=0;slow=0;return;}
+    if(was_stereo){
+        // Two consecutive slow stereo frames (or one far over budget) whose
+        // excess the second eye's draws explain.
+        const bool slow_frame=ms>budget() && ms-.4*g_last_draw_ms<=budget()*1.05;
+        slow=slow_frame?slow+1:0;
+        if(slow_frame && (slow>=2 || ms>1.25*budget())){mono=true;calm=0;slow=0;++episodes;
+            std::printf("Stereo budget: frame %.1f ms > %.1f, mono until the load drops (episode %llu, mono frames %llu)\n",ms,budget(),(unsigned long long)episodes,(unsigned long long)mono_frames);}
+        return;
+    }
+    // Mono frame while stereo is wanted: the second eye adds ~65% of the
+    // mono draw time;
+    // one calm second before returning (no stereo/mono flicker in a burst).
+    if(ms+.65*g_last_draw_ms>budget()*.9){calm=0;return;}
+    if(++calm>=30){mono=false;calm=0;}
+}
+}
 extern "C" volatile int sm64ds_gpu_affine_ready,sm64ds_gpu_affine_wanted; // castle-min30 (gpu_composite.cpp)
 static bool present_candidates_core(const V3dsVert* v,int nv,const V3dsBatch* b,int nb,
     ntr::PpuPreparedCandidates a,ntr::PpuPreparedCandidates other,
@@ -2124,7 +2581,7 @@ static bool present_candidates_core(const V3dsVert* v,int nv,const V3dsBatch* b,
     // Capture/scanline-feedback cases are rejected by the caller before this
     // entry point. They need monoscopic source pixels rather than one eye.
     if(!gpu_frame(v,nv,b,nb,"Native scene","Resident candidate",1.f,convergence,perspective,
-                  stereo&&a_upper&&!plan.delay_3d,nullptr,nullptr,true,direct_token)){g_present_refusal="core6";return false;}
+                  stereo&&a_upper&&!plan.delay_3d&&!stereo_budget::mono_now(),nullptr,nullptr,true,direct_token)){g_present_refusal="core6";return false;}
     frame_profile::Scope compose_scope(frame_profile::WorkerCompose);
 #ifdef SM64DS_NATIVE_OBJ_CANDIDATE
     // FrameBegin above drained the previous queue. Immutable texture inputs,
@@ -2163,7 +2620,9 @@ static bool present_candidates_core(const V3dsVert* v,int nv,const V3dsBatch* b,
     if(plan.view && !view_bank){shader_bind(false);end_gpu_frame();g_present_refusal="capture";return false;}
     auto compose_panel=[&](ds_gpu::Composite& compositor,unsigned panel,const ntr::PpuPreparedCandidates& scene,bool engine_a,C3D_Tex& eye_geometry){
         if(!engine_a && plan.view)compositor.view_capture(g_resident_panels[panel],view_bank->texture,plan.view_master);
-        else compositor.opaque(g_resident_panels[panel],scene,engine_a?geometry_a:eye_geometry);
+        // ingame-stereo: the right-eye panel composes the right-eye geometry
+        // (stereo is never enabled together with the delayed-3D capture plan).
+        else compositor.opaque(g_resident_panels[panel],scene,(engine_a && panel!=1)?geometry_a:eye_geometry);
     };
     compose_panel(upper_compositor,0,upper,a_upper,g_resident_geometry[0]);
     screen_scale::prepare_extension(upper,!plan.view && !upper.state.window_cut);
@@ -2251,20 +2710,25 @@ static bool present_candidates_core(const V3dsVert* v,int nv,const V3dsBatch* b,
         C3D_TexEnvInit(environment);
         C3D_TexEnvSrc(environment,C3D_Both,GPU_TEXTURE0);
         C3D_TexEnvFunc(environment,C3D_Both,GPU_REPLACE);
-        gfxSet3D(true);
+        if(screen_scale::g_layer_frame_slider>0.f)gfxSet3D(true); // visual-enhancements: mono HD logo stays 2D
     }
     if(!screen_scale::draw(targets,panel_textures,g_native_stereo||screen_scale::g_layer_frame,true)){
+    const bool top_done=screen_scale::draw_game_top(panel_textures,targets,g_native_stereo,true); // visual-enhancements
     auto* buffers=C3D_GetBufInfo();BufInfo_Init(buffers);
     BufInfo_Add(buffers,g_resident_vertices,sizeof(V3dsVert),3,0x210);
     const bool layered=screen_scale::g_layer_frame; // menu-stereo: flat right eye = panel 0
     for(unsigned panel=0;panel<3;++panel){
+        if(panel<2 && top_done)continue;
         if(panel==1 && !g_native_stereo && !layered)continue;
         C3D_RenderTargetClear(targets[panel],C3D_CLEAR_ALL,0,0);
         C3D_FrameDrawOn(targets[panel]);C3D_TexBind(0,&g_resident_panels[layered&&panel==1?0:panel].texture);
         C3D_DrawArrays(GPU_TRIANGLES,panel*6,6);
     }
     }
+    enhance_draw::bottom(g_resident_bottom); // visual-enhancements: settings screen / FPS strip
     end_gpu_frame();tick_fps("Native scene","Resident candidate");
+    enhance_runtime::note_present(v3ds_time_ms()-started,g_resident_previous_gpu);
+    stereo_budget::record(v3ds_time_ms()-started,g_native_stereo,stereo&&a_upper&&!plan.delay_3d&&stereo_slider()>0.f);
     static double wait_total=0,submit_total=0,gpu_total=0;static unsigned samples=0,counter_total[2]{};
     wait_total+=g_resident_wait;submit_total+=v3ds_time_ms()-started-g_resident_wait;
     gpu_total+=g_resident_previous_gpu;
@@ -2393,13 +2857,19 @@ static bool present_gpu_blit(const uint32_t* left,const uint32_t* right,const ui
     C3D_TexEnvFunc(environment,C3D_Both,GPU_REPLACE);
     C3D_RenderTarget* targets[]={g_left,g_right,g_blit_bottom};
     C3D_Tex* const blit_sources[]={&g_blit_textures[0],&g_blit_textures[1],&g_blit_textures[2]};
-    if(!screen_scale::draw(targets,blit_sources,stereo,false))
+    if(!screen_scale::draw(targets,blit_sources,stereo,false)){
+    const bool top_done=screen_scale::draw_game_top(blit_sources,targets,stereo,false); // visual-enhancements
+    if(top_done){buffers=C3D_GetBufInfo();BufInfo_Init(buffers);BufInfo_Add(buffers,g_blit_vertices,sizeof(V3dsVert),3,0x210);}
     for(unsigned panel=0;panel<3;++panel){
+        if(panel<2 && top_done)continue;
         if(panel==1 && !stereo)continue;
         C3D_RenderTargetClear(targets[panel],C3D_CLEAR_ALL,0,0);C3D_FrameDrawOn(targets[panel]);
         C3D_TexBind(0,&g_blit_textures[panel]);C3D_DrawArrays(GPU_TRIANGLES,panel*6,6);
     }
+    }
+    enhance_draw::bottom(g_blit_bottom); // visual-enhancements
     end_gpu_frame();tick_fps("Native scene","GPU blit");
+    enhance_runtime::note_present(0.,0.);
     if(profile){
         phase[3]=v3ds_time_ms();
         static double totals[3]{};static unsigned samples=0;

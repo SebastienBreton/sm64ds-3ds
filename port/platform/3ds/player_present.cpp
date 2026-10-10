@@ -15,6 +15,9 @@ bool bmd_compiled_frame_held(const prepared_mesh::Frame*);
 #include "gpu_composite_viewer.h"
 #ifdef SM64DS_NATIVE_OBJ_CANDIDATE
 #include "native_obj_input_views.h"
+// minigames-30fps-min: NativeObjMerge::supported without the citro3d header
+// (3ds.h must be included below with the u32/s32 renames).
+namespace ds_gpu{bool native_obj_merge_supported(ntr::PpuPreparedCandidates);}
 #endif
 #endif
 #include "ds_gpu_viewport.h"
@@ -762,6 +765,27 @@ static EngineBInput prepare_engine_b_background(){
     input.objects=input.background && !input.background->state.has_geometry;
     return input;
 }
+// minigames-30fps-min: engine A without 3D (2D-only top screens, e.g. Puzzle
+// Panic's picture made of 36 sprites: 20 ms of CPU OBJ raster + merge) uses
+// the same GPU-resident OBJ path as engine B: BG-only planes (double-buffered,
+// may be prepared before wait_idle) + an OBJ plan prepared after it. Not when
+// engine A is a display-capture source (the capture is taken before the OBJ
+// merge). PLAYER_NO_A_RESIDENT_OBJECTS=1 keeps the CPU OBJ raster.
+static bool engine_a_objects_enabled(){
+    static const bool value=std::getenv("PLAYER_NO_A_RESIDENT_OBJECTS")==nullptr;
+    return value && resident_option_enabled("PLAYER_RESIDENT_OBJECTS");
+}
+static std::optional<ntr::PpuPreparedCandidates> engine_a_background(bool capture_planned){
+    if(capture_planned || !engine_a_objects_enabled() || !ds_gpu::native_obj_admit(ntr::ENGINE_A))return std::nullopt;
+    auto background=ntr::ppu_prepare_background_candidates_cached(ntr::ENGINE_A);
+    if(!background || background->state.has_geometry || !ds_gpu::native_obj_merge_supported(*background))return std::nullopt;
+    return background;
+}
+static EngineBInput prepare_engine_a_background(bool capture_planned){
+    EngineBInput input;
+    if(auto background=engine_a_background(capture_planned)){input.background.emplace(*background);input.objects=true;}
+    return input;
+}
 // castle-min30: same result as prepare_engine_b_background(), split around
 // engine A's preparation: begin() posts the GPU-affine attempt to the core-1
 // helper, end() joins it and completes on the main thread (window cut, or the
@@ -790,11 +814,16 @@ static void prepare_engine_b_parallel_end(EngineBParallel& p,EngineBInput& input
 // Early candidates (minigames-30fps-min) were prepared before wait_idle()
 // into cache ways the previous job does not read.
 struct EarlyCandidates {std::optional<ntr::PpuPreparedCandidates> a,b;};
-static void prepare_job_ppu(EngineBInput& input,bool b_capture_view=false,const EarlyCandidates* early=nullptr){
+static void prepare_job_ppu(EngineBInput& input,bool b_capture_view=false,const EarlyCandidates* early=nullptr,EngineBInput* a_input=nullptr){
     using namespace present_pipeline;
     job.a.reset();job.b.reset();job.objects[0]=job.objects[1]=nullptr;
     auto prepare_a=[&]{
         frame_profile::Scope s(frame_profile::MainPpuA);
+        if(a_input && a_input->objects){
+            {frame_profile::Scope o(frame_profile::MainObjPrepare);job.objects[0]=ds_gpu::native_obj_prepare(ntr::ENGINE_A);}
+            if(job.objects[0]){job.a.emplace(*a_input->background);return;}
+            a_input->objects=false;
+        }
         if(early && early->a)job.a.emplace(*early->a);else job.a.emplace(ntr::ppu_prepare_candidates_cached(ntr::ENGINE_A));
     };
     if(b_capture_view){
@@ -932,6 +961,7 @@ static bool player_present_pipelined(){
     const bool a_upper=ntr::io_read(0x04000304,2)&0x8000;
     if(capture_frame.writeback>=0){wait_idle();mesh_pipeline_settle();capture_gpu::writeback(capture_frame);}
     auto engine_b=capture_frame.plan.view?EngineBInput{}:prepare_engine_b_background();
+    auto engine_a=prepare_engine_a_background(capture_frame.plan.capture);
     // minigames-30fps-min: while the worker still presents the previous
     // frame, prepare this frame's engine A (and full engine B) candidates
     // into PPU cache ways that job does not read, instead of after waiting.
@@ -942,7 +972,7 @@ static bool player_present_pipelined(){
         const bool need_b=!capture_frame.plan.view && !engine_b.objects;
         if(!need_b || ntr::ppu_unpinned_way_available(ntr::ENGINE_B)){
             frame_profile::Scope s(frame_profile::MainPpuA);
-            early.a.emplace(ntr::ppu_prepare_candidates_cached(ntr::ENGINE_A));
+            if(!engine_a.objects)early.a.emplace(ntr::ppu_prepare_candidates_cached(ntr::ENGINE_A));
             if(need_b)early.b.emplace(ntr::ppu_prepare_candidates_cached(ntr::ENGINE_B));
         }
     }
@@ -954,7 +984,7 @@ static bool player_present_pipelined(){
         return false;
     }
     set_native_clear_from_ds();
-    prepare_job_ppu(engine_b,capture_frame.plan.view,&early);
+    prepare_job_ppu(engine_b,capture_frame.plan.view,&early,&engine_a);
     job.capture=capture_frame.plan;
     job.mesh.reset();
     job.gpu=ntr::gx_gpu_publish();
@@ -1109,6 +1139,10 @@ bool player_present(bool capture,bool perspective){
             auto prepare=[&](ntr::Engine engine){
                 // minigames-2d-gpu: B shows a GPU capture bank (planes unused).
                 if(engine==ntr::ENGINE_B && capture_frame.plan.view && engine_a_view)return *engine_a_view;
+                if(engine==ntr::ENGINE_A)if(auto background=engine_a_background(capture_frame.plan.capture)){ // minigames-30fps-min
+                    objects[engine]=ds_gpu::native_obj_prepare(engine);
+                    if(objects[engine])return *background;
+                }
                 if(resident_objects && engine==ntr::ENGINE_B && ds_gpu::native_obj_admit(engine)){
                     const auto background=ntr::ppu_prepare_background_candidates_cached(engine);
                     if(background && !background->state.has_geometry){

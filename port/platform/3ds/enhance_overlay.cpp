@@ -9,43 +9,39 @@ namespace {
 struct Item {
     const char* label;
     const char* help;        // shown in the info box
-    bool restart;            // boot option ("au prochain démarrage")
+    bool restart;            // boot option ("after restart")
     int count;
     const char* values[6];
 };
 // Order = display order. Values are indices in the matching Settings field.
 const Item kItems[] = {
-    {"Logo du titre HD", "Logo redessiné en HD (xBR). Calcul unique au chargement du titre.", false, 2, {"Non", "Oui"}},
-    {"Méthode du logo", "xBR: contours nets. MMPX: couleurs exactes. Super-xBR: plus doux.", false, 5, {"xBR", "MMPX", "Super-xBR", "EPX", "Pixels DS"}},
-    {"Écran du haut en jeu", "Lissé net: pixels réguliers au lieu de colonnes doublées.", false, 2, {"Pixels bruts", "Lissé net"}},
-    {"Résolution 3D", "Native: 3D calculée en 400x240. 2x: anticrénelage (coût GPU x4).", false, 3, {"DS 256x192", "Native", "2x (AA)"}},
-    {"Filtrage des textures", "Auto: bilinéaire sauf textures découpées (feuilles, grilles).", false, 3, {"Désactivé", "Auto", "Toujours"}},
-    {"Interface 2D HD", "Boutons, textes et icônes agrandis en HD (expérimental).", false, 2, {"Non", "Oui"}},
-    {"Disposition des menus", "DS 4:3 = proportions d'origine. Étirée = plein écran.", true, 3, {"Auto", "DS 4:3", "Étirée"}},
-    {"Filtre des menus", "Lissé net = rendu actuel; Pixels = plus proche voisin.", true, 2, {"Lissé net", "Pixels"}},
-    {"Ciel pleine largeur", "Prolonge le ciel du titre sur les bandes latérales.", true, 2, {"Oui", "Non"}},
-    {"Afficher les FPS", "Compteur d'images par seconde en haut à gauche.", false, 2, {"Non", "Oui"}},
-    {"Mesure GPU (journal)", "Écrit le temps GPU par image dans user-test.log.", false, 2, {"Non", "Oui"}},
-    {"Stick (Circle Pad)", "Analogique: vitesse selon l'inclinaison, sans Y. DS: croix + Y.", false, 2, {"DS (numérique)", "Analogique"}},
+    {"HD title logo", "Logo redrawn in HD (computed once in the background, cached on SD).", false, 2, {"No", "Yes"}},
+    {"Logo method", "xBR: sharp edges. MMPX: exact colours. Super-xBR: softer.", false, 4, {"xBR", "MMPX", "Super-xBR", "EPX"}},
+    {"In-game top screen", "Sharp smooth: even pixels (GPU cost: one extra pass).", false, 2, {"Raw pixels", "Sharp smooth"}},
+    {"Texture filtering", "Auto: bilinear except cut-out textures (leaves, grids).", false, 3, {"Off", "Auto", "Always"}},
+    {"Menu layout", "DS 4:3 = original proportions. Stretched = full screen.", true, 3, {"Auto", "DS 4:3", "Stretched"}},
+    {"Menu filter", "Sharp smooth = current look; Pixels = nearest neighbour.", true, 2, {"Sharp smooth", "Pixels"}},
+    {"Full-width sky", "Extends the title screen sky over the side bars.", true, 2, {"Yes", "No"}},
+    {"FPS counter", "Updates and frames per second (+ GPU time), top left.", false, 3, {"Off", "FPS", "FPS + GPU"}},
+    {"Circle Pad", "Analog: speed follows the tilt, no Y needed. DS: D-pad + Y to run.", false, 2, {"DS (digital)", "Analog"}},
+    {"Camera (C-Stick)", "DS arrows: like the touch arrows, down=L up=X. Free: analog + tilt.", false, 3, {"Off", "DS arrows", "Free"}},
 };
 constexpr int kCount = int(sizeof kItems / sizeof kItems[0]);
 // Method menu index <-> enhance::Method value (enhance_upscale.h order).
-constexpr uint8_t kMethodOf[5] = {7 /*xbr*/, 4 /*mmpx*/, 5 /*superxbr*/, 3 /*epx*/, 1 /*sharp*/};
+constexpr uint8_t kMethodOf[4] = {7 /*xbr*/, 4 /*mmpx*/, 5 /*superxbr*/, 3 /*epx*/};
 
 int get(const Settings& s, int item) {
     switch (item) {
     case 0: return s.logo_hd;
-    case 1: for (int i = 0; i < 5; ++i) if (kMethodOf[i] == s.logo_method) return i; return 0;
+    case 1: for (int i = 0; i < 4; ++i) if (kMethodOf[i] == s.logo_method) return i; return 0;
     case 2: return int(s.gameplay_filter);
-    case 3: return int(s.res3d);
-    case 4: return int(s.tex_filter);
-    case 5: return s.ui_hd;
-    case 6: return int(s.top_layout);
-    case 7: return s.screen_filter == ScreenFilter::Sharp ? 0 : 1;
-    case 8: return s.full_width_sky ? 0 : 1;
-    case 9: return s.show_fps;
-    case 10: return s.gpu_timing;
-    case 11: return s.circle_pad_analog;
+    case 3: return int(s.tex_filter);
+    case 4: return int(s.top_layout);
+    case 5: return s.screen_filter == ScreenFilter::Sharp ? 0 : 1;
+    case 6: return s.full_width_sky ? 0 : 1;
+    case 7: return s.show_fps ? (s.gpu_timing ? 2 : 1) : 0;
+    case 8: return s.circle_pad_analog;
+    case 9: return s.camera_cstick <= 2 ? s.camera_cstick : 1;
     }
     return 0;
 }
@@ -54,15 +50,13 @@ void set(Settings& s, int item, int v) {
     case 0: s.logo_hd = v != 0; break;
     case 1: s.logo_method = kMethodOf[v]; break;
     case 2: s.gameplay_filter = ScreenFilter(v); break;
-    case 3: s.res3d = Res3d(v); break;
-    case 4: s.tex_filter = TexFilter(v); break;
-    case 5: s.ui_hd = v != 0; break;
-    case 6: s.top_layout = TopLayout(v); break;
-    case 7: s.screen_filter = v == 0 ? ScreenFilter::Sharp : ScreenFilter::Nearest; break;
-    case 8: s.full_width_sky = v == 0; break;
-    case 9: s.show_fps = v != 0; break;
-    case 10: s.gpu_timing = v != 0; break;
-    case 11: s.circle_pad_analog = v != 0; break;
+    case 3: s.tex_filter = TexFilter(v); break;
+    case 4: s.top_layout = TopLayout(v); break;
+    case 5: s.screen_filter = v == 0 ? ScreenFilter::Sharp : ScreenFilter::Nearest; break;
+    case 6: s.full_width_sky = v == 0; break;
+    case 7: s.show_fps = v != 0; s.gpu_timing = v == 2; break;
+    case 8: s.circle_pad_analog = v != 0; break;
+    case 9: s.camera_cstick = uint8_t(v); break;
     }
 }
 
@@ -162,8 +156,10 @@ bool SettingsOverlay::update(uint32_t held, uint32_t down) {
     if (down & kKeyX) { Settings r = Settings::recommended(); Settings cur = snapshot();
         r.top_layout = cur.top_layout; r.screen_filter = cur.screen_filter; r.full_width_sky = cur.full_width_sky;
         r.circle_pad_analog = cur.circle_pad_analog;   // input choice is not a display preset
+        r.camera_cstick = cur.camera_cstick;
         publish(r); dirty_ = true; }
     if (down & kKeyY) { Settings r = Settings::safe(); r.circle_pad_analog = snapshot().circle_pad_analog;
+        r.camera_cstick = snapshot().camera_cstick;
         publish(r); dirty_ = true; }
     if (down & kKeyB) {
         open_ = false;
@@ -186,7 +182,7 @@ void SettingsOverlay::render(uint32_t* img, const uint8_t* font) const {
     draw_text(img, kW, kH, (kW - text_width(title, 2)) / 2, 6, title, gold, font, 2);
     fill(img, 8, 25, kW - 8, 26, 0x80ffffffu);
     const Settings s = snapshot();
-    const int row_h = 13, top = 31;
+    const int row_h = 15, top = 31;
     for (int i = 0; i < kCount; ++i) {
         const int y = top + i * row_h;
         const bool sel = i == selected_;
@@ -225,9 +221,9 @@ void SettingsOverlay::render(uint32_t* img, const uint8_t* font) const {
         if (row < 2 && len) { line[len] = 0; draw_text(img, kW, kH, 10, by + 3 + row * 10, line, white, font); }
     }
     if (notes_[selected_][0]) draw_text(img, kW, kH, 10, by + 24, notes_[selected_], gold, font);
-    draw_text(img, kW, kH, 4, kH - 10, "A changer B fermer X conseill\xc3\xa9 Y origine", dim, font);
+    draw_text(img, kW, kH, 4, kH - 10, "A:set B:close X:recommended Y:original", dim, font);
     // "*" legend just above the help line
-    if (!notes_[selected_][0]) { const char* legend = "* au prochain d\xc3\xa9marrage"; draw_text(img, kW, kH, kW - 8 - text_width(legend, 1), by + 24, legend, dim, font); }
+    if (!notes_[selected_][0]) { const char* legend = "* after restart"; draw_text(img, kW, kH, kW - 8 - text_width(legend, 1), by + 24, legend, dim, font); }
 }
 
 }  // namespace enhance

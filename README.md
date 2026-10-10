@@ -29,7 +29,10 @@ natively on the 3DS CPU; the DS 2D/3D hardware is reimplemented on top of the 3D
 - Whole game playable: menus, castle, courses, bosses, the 36 Rec Room mini-games
 - DS rendering on the 3DS GPU: geometry, lighting, toon shading, 2D layers, display capture
 - Full-width blue sky on the 3DS top screen (4:3 game image, no stretching)
-- Stereoscopic 3D in the title menu (layered depth, the star flies in front of / behind the logo)
+- Stereoscopic 3D in the title menu (layered depth, the star flies in front of / behind the logo) and in game
+  (both eyes in one GPU pass, HUD at screen depth, automatic mono fallback on heavy frames)
+- New 3DS C-Stick camera: "DS arrows" (same as the touch camera arrows) or a smooth "Free" camera
+- OPTIONS screen (SELECT+START): HD title logo, texture filtering, Circle Pad / C-Stick modes, fps counter
 - Analog Circle Pad movement (slight tilt = walk, full tilt = run) — DS digital mode still available
 - Sound: original SDAT sequences, sample-exact mixer
 - Real-time pacing with frame skipping when the GPU falls behind
@@ -41,16 +44,18 @@ Known issues and ongoing work are tracked in the GitHub issues. Highlights:
 
 - New 3DS recommended. Menu ~40–60 fps, castle/courses ~30 fps on hardware (optimisation ongoing)
 - Some translucency effects (shadows, translucent boxes) are wrong on real hardware
-- Stereoscopic 3D in-game is not done yet
+- Stereoscopic 3D, OPTIONS and C-Stick camera are validated in Azahar, not yet on hardware
 
 ## 🎮 Controls and settings
 
 DS controls are kept (D-pad to walk, `Y` to run, `A` jump, `B` punch, touch screen as on DS).
-The Circle Pad is analog by default. Settings live in `sdmc:/sm64ds/settings.ini`:
+The Circle Pad is analog by default, the C-Stick (New 3DS) turns the camera. Press **SELECT+START**
+to open the OPTIONS screen; settings are saved in `sdmc:/sm64ds/settings.ini`:
 
 ```ini
 [input]
-circle_pad = analog   ; or: ds  (Circle Pad acts as the D-pad, like the original)
+circle_pad = analog     ; or: ds  (Circle Pad acts as the D-pad, like the original)
+camera_cstick = ds      ; or: free / off
 ```
 
 ## 🏗️ Building

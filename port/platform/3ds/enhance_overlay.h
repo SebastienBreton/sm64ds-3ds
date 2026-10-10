@@ -1,5 +1,5 @@
 #pragma once
-// visual-enhancements: port-side settings screen ("Options d'affichage").
+// visual-enhancements: port-side settings screen ("OPTIONS", English UI).
 //
 // Opened with SELECT+START held together for ~0.25 s (works in menus and in
 // game; the DS game never sees SELECT+START together because the overlay

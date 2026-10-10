@@ -14,7 +14,7 @@ inline bool sm64ds_configure_renderer_defaults() {
         {"PLAYER_MIXED_UNIFIED_SHADER", "1"},
         {"PLAYER_RETAIN_HELD_RASTER", "1"},
         {"PLAYER_GPU_COMMAND_DRAIN", "1"},
-        {"PLAYER_GPU_COMMAND_BUFFER_KIB", "512"},
+        {"PLAYER_GPU_COMMAND_BUFFER_KIB", "1024"}, // ingame-stereo: room for both eyes (512 drained mid-frame in stereo)
         {"PLAYER_CLIP_SPARSE_PRODUCT", "1"},
         {"PLAYER_AUDIO_SEGMENT_VOICES", "1"},
         // DS geometry evaluation, lighting and clipping on the PICA in stages

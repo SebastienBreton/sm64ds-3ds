@@ -1009,6 +1009,18 @@ if(NINTENDO_3DS)
     # (settings.ini [input] circle_pad, SM64DS_ANALOG_PAD). The wrappers call
     # the originals first; dMap_c only is shown touching=0 for the analog sample.
     target_sources(smoke_player PRIVATE platform/3ds/analog_pad.cpp platform/3ds/enhance_settings.cpp)
+    # cstick-camera: New 3DS C-Stick camera (settings.ini [input] camera_cstick,
+    # SM64DS_CSTICK_CAMERA): DS-arrow commands after Stage::CheckInput (same
+    # wrapper) + analog hooks in func_02009e70 / func_0200bb28 (identity when off).
+    target_sources(smoke_player PRIVATE platform/3ds/cstick_camera.cpp)
+    # visual-enhancements phase 2: SELECT+START settings screen (input filter,
+    # overlay model/renderer), HD title logo (on-device 4xBR from the game's own
+    # BG layer, cached on SD), presentation options. enhance_settings.cpp above.
+    foreach(enhance_target IN ITEMS smoke_player sm64ds_viewer)
+        target_sources(${enhance_target} PRIVATE platform/3ds/enhance_runtime.cpp platform/3ds/enhance_overlay.cpp
+            platform/3ds/enhance_logo.cpp platform/3ds/enhance_upscale.cpp)
+    endforeach()
+    target_sources(sm64ds_viewer PRIVATE platform/3ds/enhance_settings.cpp)
     target_link_options(smoke_player PRIVATE
         "-Wl,--wrap=_ZN5Stage10CheckInputEv"
         "-Wl,--wrap=_ZN7fBase_c14BeforeBehaviorEv"

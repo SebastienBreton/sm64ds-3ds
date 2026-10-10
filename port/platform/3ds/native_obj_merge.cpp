@@ -17,6 +17,7 @@ void NativeObjMerge::destroy(){
     std::free(snapshot_);std::free(pixels_);snapshot_=nullptr;pixels_=nullptr;
     valid_=false;
 }
+bool native_obj_merge_supported(ntr::PpuPreparedCandidates candidates){return NativeObjMerge::supported(candidates);} // minigames-30fps-min
 bool NativeObjMerge::supported(ntr::PpuPreparedCandidates candidates){
     const auto& scene=candidates.state;
     if(scene.has_geometry || scene.has_windows || !composite_blend_free(scene))return false;

@@ -27,6 +27,7 @@ static ntr::HostVector<float> depths;
 // Uniform state already in the shader registers since the last bind.
 static bool bound=false;
 static int loaded_env=-1;
+static bool highlight_pass=false;   // upload_env: highlight envs give the additive table colour
 static std::int32_t loaded_entry[palette_slots];
 static int loaded_tw=-1,loaded_th=-1;
 static std::int16_t loaded_viewport[4]={-1,-1,-1,-1};
@@ -178,15 +179,26 @@ static void upload_env(int id){
         // DS toon shading (face-toy): colour = ToonTable[lit red]. The shader's
         // per-channel lighting is linear up to the final floor/clamp, so feeding
         // every channel the red terms gives red everywhere; the table itself is
-        // applied as a per-channel affine fit (exact for the grey identity ramp
-        // the title heads use; transient fade tables are approximated).
-        const auto& e=frame->envs[id];float a[3],b[3];
-        for(unsigned k=0;k<3;++k){
-            bool identity=true;double si=0,st=0,sii=0,sit=0;
-            for(unsigned i=0;i<32;++i){const double v=(e.table[i]>>(5*k))&31;identity&=v==i;si+=i;st+=v;sii+=double(i)*i;sit+=i*v;}
-            if(identity){a[k]=1.f;b[k]=0.f;continue;}
-            const double slope=(32*sit-si*st)/(32*sii-si*si),bias=(st-slope*si)/32;
-            a[k]=float(slope);b[k]=float(bias+.5-.5*slope); // floor(a*x+b) ~ round(fit(floor x))
+        // applied as a per-channel fit max(0, a*red+b) (exact for the grey
+        // identity ramp the title heads use; other tables are approximated).
+        // Highlight envs (toon==2): the base pass is the grey red colour; the
+        // additive pass (highlight_pass) is the fitted table colour.
+        const auto& e=frame->envs[id];float a[3]={1.f,1.f,1.f},b[3]={0.f,0.f,0.f};
+        if(e.toon==1 || highlight_pass)for(unsigned k=0;k<3;++k){
+            double v[32];bool identity=true;
+            for(unsigned i=0;i<32;++i){v[i]=(e.table[i]>>(5*k))&31;identity&=v[i]==i;}
+            if(identity)continue;
+            // Hinge fit: least squares on [s,31] for every start s, error of
+            // max(0, line) over the whole table; keep the best.
+            double best=1e30;
+            for(unsigned s=0;s<31;++s){
+                double si=0,st=0,sii=0,sit=0;const double n=32-s;
+                for(unsigned i=s;i<32;++i){si+=i;st+=v[i];sii+=double(i)*i;sit+=i*v[i];}
+                const double den=n*sii-si*si;if(den==0)continue;
+                const double slope=(n*sit-si*st)/den,bias=(st-slope*si)/n;
+                double err=0;for(unsigned i=0;i<32;++i){double f=slope*i+bias;if(f<0)f=0;err+=(f-v[i])*(f-v[i]);}
+                if(err<best){best=err;a[k]=float(slope);b[k]=float(bias+.5-.5*slope);} // floor(a*x+b) ~ round(fit(floor x))
+            }
         }
         auto red=[&](C3D_FVec& v,bool add_bias){const float r=v.x;v=FVec4_New(a[0]*r+(add_bias?b[0]:0.f),a[1]*r+(add_bias?b[1]:0.f),a[2]*r+(add_bias?b[2]:0.f),v.w);};
         red(*base,true);
@@ -195,8 +207,16 @@ static void upload_env(int id){
     for(unsigned i=1;i<4;++i)C3D_BoolUnifSet(GPU_VERTEX_SHADER,b_light[i],count>i);
     ++stats.env_uploads;
 }
-static void draw_batch(const V3dsBatch& b,int i){
+// True when a run of batch i uses a highlight env (DS polygon mode 2 with
+// DISP3DCNT bit 1): the viewer then draws draw_batch(b,i,true) additively.
+static bool highlight_batch(int i){
+    if(!frame)return false;
+    for(std::uint32_t r=batch_runs.at(i);r<batch_runs.at(i+1);++r){const int e=runs[r].env;if(e>=0 && frame->envs[e].toon==2)return true;}
+    return false;
+}
+static void draw_batch(const V3dsBatch& b,int i,bool highlight=false){
     if(!bound)bind();
+    if(highlight!=highlight_pass){highlight_pass=highlight;loaded_env=-2;}
     if(loaded_tw!=b.tw || loaded_th!=b.th){
         C3D_FVUnifSet(GPU_VERTEX_SHADER,u_texdims,b.tw?1.f/(16.f*b.tw):0.f,b.th?1.f/(16.f*b.th):0.f,0.f,0.f);
         loaded_tw=b.tw;loaded_th=b.th;
@@ -207,6 +227,7 @@ static void draw_batch(const V3dsBatch& b,int i){
             C3D_FVUnifSet(GPU_VERTEX_SHADER,u_vport,run.viewport[2]*.5f,run.viewport[0],run.viewport[3]*.5f,run.viewport[1]);
             std::memcpy(loaded_viewport,run.viewport,8);
         }
+        if(highlight && (run.env<0 || frame->envs[run.env].toon!=2))continue; // additive pass: highlight runs only
         if(run.env>=0 && run.env!=loaded_env){upload_env(run.env);loaded_env=run.env;}
         else if(loaded_env==-2){upload_env(-1);loaded_env=-1;}
         for(unsigned s=0;s<palette_slots;++s){
