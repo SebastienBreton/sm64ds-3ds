@@ -1,0 +1,19 @@
+; Resident DS composition candidate. All positions are already clip space.
+; Identity quaternion lets three directional fragment lights independently
+; index a lookup table with texture R, G and B, without normalizing RGB.
+.constf constants(0.0, 1.0, -0.5, 0.0)
+.out outpos position
+.out outclr color
+.out outtc0 texcoord0
+.out outtc1 texcoord1
+.out outview view
+.out outquat normalquat
+.proc main
+    mov outpos, v0
+    mov outtc0, v1
+    mov outtc1, v2
+    mov outclr, constants.yyyy
+    mov outview, constants.xxyx
+    mov outquat, constants.xxxy
+    end
+.end

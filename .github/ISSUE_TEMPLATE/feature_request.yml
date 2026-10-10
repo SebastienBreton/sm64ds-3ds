@@ -1,0 +1,14 @@
+name: Feature request
+description: Suggest an improvement or a 3DS-specific enhancement
+labels: [enhancement]
+body:
+  - type: textarea
+    id: idea
+    attributes:
+      label: What would you like?
+    validations:
+      required: true
+  - type: textarea
+    id: why
+    attributes:
+      label: Why? Should it be optional (settings) to keep the DS behaviour?

@@ -1,0 +1,133 @@
+{
+  "schema": "native-arm32-reviewed-primary-vtables-v1",
+  "pointer_bytes": 4,
+  "gcc_primary_tables": {
+    "_ZTV13daObjSeesaw_c": {
+      "primary_address_point_offset": 8,
+      "linked_words": [
+        0,
+        2577744,
+        1097368,
+        1227244
+      ],
+      "RTTI_symbol": "_ZTI13daObjSeesaw_c"
+    },
+    "_ZTV10daUdlift_c": {
+      "primary_address_point_offset": 8,
+      "linked_words": [
+        0,
+        2578428,
+        1105788,
+        1227244
+      ],
+      "RTTI_symbol": "_ZTI10daUdlift_c"
+    },
+    "_ZTV13daObjSwitch_c": {
+      "words": [
+        0,
+        2581064,
+        1144656,
+        1227244
+      ],
+      "primary_address_point_offset": 8
+    },
+    "_ZTV12daStarBase_c": {
+      "words": [
+        0,
+        2592804,
+        1642228,
+        1227244
+      ],
+      "primary_address_point_offset": 8
+    },
+    "_ZTV8daStar_c": {
+      "words": [
+        0,
+        2592776,
+        1643208,
+        1227244
+      ],
+      "primary_address_point_offset": 8
+    },
+    "_ZTV7fBase_c": {
+      "words": [
+        0,
+        2584688,
+        1235620,
+        1234716
+      ],
+      "primary_address_point_offset": 8
+    },
+    "_ZTV4View": {
+      "words": [
+        0,
+        2593840,
+        1235620,
+        1234716
+      ],
+      "primary_address_point_offset": 8
+    },
+    "_ZTV6Camera": {
+      "words": [
+        0,
+        2588020,
+        1512852,
+        1234716
+      ],
+      "primary_address_point_offset": 8
+    },
+    "_ZTV7dBase_c": {
+      "primary_address_point_offset": 8,
+      "linked_words": [
+        0,
+        2581516,
+        1130580,
+        1129676
+      ],
+      "RTTI_symbol": "_ZTI7dBase_c"
+    },
+    "_ZTV8dScene_c": {
+      "primary_address_point_offset": 8,
+      "linked_words": [
+        0,
+        2590596,
+        1130580,
+        1616664
+      ],
+      "RTTI_symbol": "_ZTI8dScene_c"
+    },
+    "_ZTV12dScStarSel_c": {
+      "primary_address_point_offset": 8,
+      "linked_words": [
+        0,
+        2595216,
+        1718484,
+        1616664
+      ],
+      "RTTI_symbol": "_ZTI12dScStarSel_c"
+    }
+  },
+  "linked_evidence": {
+    "build3ds/validation/bob-entry-closure/real-entry-v4/vtable-prefix-proof.json": {
+      "sha256": "cf6eac53990b65595ecd95e150ae7c1fdd16aaa9fd6718dc7c847d386d6fc20c",
+      "elf_sha256": "32e3d47dc44b4af50ceafcf6b10ae88ed2bb67bd296d7aa52bb7edaac39398ad"
+    },
+    "build3ds/validation/bob-entry-closure/real-entry-v5/additional-vtable-proof.json": {
+      "sha256": "2f928bded32713a71820f2120ff0e5e3688bc9b8a4c68e99ebb8022975367902",
+      "elf_sha256": "aa2502cad87a090e4562b7d536d9726252e8d499ca75e188b8ce5a02a6019a30"
+    },
+    "build3ds/validation/bob-production-integration/star-select-common/star-vtable-prefix-proof.json": {
+      "sha256": "1520d324818fd71c7cf30ac960f5e9e6a4aa1a41cf111c8b93a3977825328edf",
+      "elf_sha256": "c0e6a1faa1d5b5778a9c5ab66333993d8a4cb9391164d50dd71e92b968d1ade7"
+    }
+  },
+  "runtime_proof": {
+    "binary_sha256": "c921e85dda0829449b72bfa6cdd4827f8c97323889ed2d911f8cf988c4c2cbbe",
+    "result": "PASS natural Bob entry;0 Unmapped;63 checkpoints"
+  },
+  "limits": [
+    "Only these primary tables qualify; no universal assumption from _ZTV spelling.",
+    "Existing offset/index expressions and unreviewed layouts remain unchanged; linked audit required.",
+    "Not for 64-bit native pointers or secondary address points."
+  ]
+}

@@ -1,0 +1,193 @@
+{
+  "version": 1,
+  "metadata_types": [
+    "_ZTI19dMgTrmpObjAdapter_c",
+    "_ZTI23dMgTrmpRingObjAdapter_c",
+    "_ZTI18dMgTrmpln3DMario_c",
+    "_ZTI17dMgTrmpln2Mario_c"
+  ],
+  "ownership": [
+    {
+      "source": "src/minigames/d_s_mg_trampoline.cpp",
+      "symbols": [
+        "data_ov006_0213faa0",
+        "data_ov006_0213faa8",
+        "data_ov006_0213fab0",
+        "g_profile_MG_TRAMPOLINE",
+        "data_ov006_0213fac0",
+        "data_ov006_0213fac8",
+        "data_ov006_0213fadc",
+        "data_ov006_0213fb04",
+        "data_ov006_0213fb18"
+      ]
+    },
+    {
+      "source": "src/minigames/d_s_mg_trampoline2.cpp",
+      "symbols": [
+        "data_ov006_0213fbc4",
+        "g_profile_MG_TRAMPOLINE2",
+        "data_ov006_0213fbd0",
+        "data_ov006_0213fbd8",
+        "data_ov006_0213fbe0",
+        "data_ov006_0213fbe8",
+        "data_ov006_0213fbf0",
+        "data_ov006_0213fbf8",
+        "data_ov006_0213fc10",
+        "data_ov006_0213fc20",
+        "data_ov006_0213fc34",
+        "data_ov006_0213fc48"
+      ]
+    }
+  ],
+  "vtable_aliases": [
+    {
+      "alias": "data_ov004_020bc03c",
+      "target": "_ZTVN11dScMgBase_c15graphCallback_cE",
+      "offset": 8
+    },
+    {
+      "alias": "data_ov004_020bc0c0",
+      "target": "_ZTV11dScMgBase_c",
+      "offset": 8
+    },
+    {
+      "alias": "data_ov006_0213b918",
+      "target": "_ZTV12dScMgAmida_c",
+      "offset": 8
+    },
+    {
+      "alias": "data_ov006_0213bbb4",
+      "target": "_ZTV14dScMgBomroom_c",
+      "offset": 8
+    },
+    {
+      "alias": "data_ov006_0213bf50",
+      "target": "_ZTV11dScMgCoin_c",
+      "offset": 8
+    },
+    {
+      "alias": "data_ov006_0213c304",
+      "target": "_ZTV14dScMgCurling_c",
+      "offset": 8
+    },
+    {
+      "alias": "data_ov006_0213c510",
+      "target": "_ZTV15dScMgCurling2_c",
+      "offset": 8
+    },
+    {
+      "alias": "data_ov006_0213cab8",
+      "target": "_ZTV15dScMgHanachan_c",
+      "offset": 8
+    },
+    {
+      "alias": "data_ov006_0213cf10",
+      "target": "_ZTV12dScMgLuigi_c",
+      "offset": 8
+    },
+    {
+      "alias": "data_ov006_0213d9cc",
+      "target": "_ZTV15dScMgPachinko_c",
+      "offset": 8
+    },
+    {
+      "alias": "data_ov006_0213dbbc",
+      "target": "_ZTV16dScMgPachinko2_c",
+      "offset": 8
+    },
+    {
+      "alias": "data_ov006_0213e24c",
+      "target": "_ZTV12dScMgPanel_c",
+      "offset": 8
+    },
+    {
+      "alias": "data_ov006_0213eb40",
+      "target": "_ZTV12dScMgSlot1_c",
+      "offset": 8
+    },
+    {
+      "alias": "data_ov006_0213fa0c",
+      "target": "_ZTV13dScMgTeresa_c",
+      "offset": 8
+    }
+  ],
+  "helpers": [
+    "func_020169f4",
+    "func_0203cc28",
+    "func_0203d4d0",
+    "func_0203d524",
+    "func_0203d570",
+    "func_0203d5bc",
+    "func_02057d00",
+    "func_02057ce8",
+    "func_02057410",
+    "func_02057e00",
+    "func_02057d94",
+    "func_02057d30",
+    "func_02045e70",
+    "func_02045ec4"
+  ],
+  "limits": [
+    "All 30 retail ov6 scene actors (36 Rec Room entries) are runtime-admitted; per-game evidence in build3ds/validation/minigames-import.",
+    "Trampoline Time/Terror (384/385) dual-screen capture needs GPU capture with engine-A BG layers in flat VRAM (display layer).",
+    "Rabbit unlock and exact DS/native RNG parity pending; tests use a synthetic all-unlocked cart."
+  ],
+  "shared_native_relocations": [
+    {
+      "at": "0x210a8fc",
+      "target": "0x20ad494",
+      "hint": "overlays(0,1)",
+      "native_symbol": "_ZTV9dThIcon_c"
+    },
+    {
+      "at": "0x210a94c",
+      "target": "0x20ad494",
+      "hint": "overlays(0,1)",
+      "native_symbol": "_ZTV9dThIcon_c"
+    },
+    {
+      "at": "0x210d730",
+      "target": "0x20ad494",
+      "hint": "overlays(0,1)",
+      "native_symbol": "_ZTV9dThIcon_c"
+    },
+    {
+      "at": "0x213e59c",
+      "target": "0x20ad478",
+      "hint": "overlays(0,1)",
+      "native_symbol": "_ZTI9dThIcon_c"
+    }
+  ],
+  "admitted_actor_ids": [
+    361,
+    362,
+    363,
+    364,
+    365,
+    366,
+    367,
+    368,
+    369,
+    370,
+    371,
+    372,
+    373,
+    374,
+    375,
+    376,
+    377,
+    378,
+    379,
+    380,
+    381,
+    382,
+    383,
+    384,
+    385,
+    386,
+    387,
+    388,
+    389,
+    390
+  ]
+}

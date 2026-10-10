@@ -1,0 +1,43 @@
+# --- Copyrighted material: NEVER commit ---
+# The ROM and anything extracted from it stays on your machine.
+# (sm64ds-decomp/ is a submodule; its own .gitignore covers extracted/ and build/.)
+*.nds
+baserom*
+*.sav
+*.bin
+*.bmp
+*.mln
+*.ml[0-9]
+*.ml[0-9][0-9]
+
+# Build outputs
+out/
+build/
+build3ds/cmake/
+build3ds/cmake-*/
+build3ds/user-build/
+build3ds/game/
+build3ds/menu-compile/
+build3ds/releases/
+build3ds/validation/
+*.3dsx
+*.cia
+*.elf
+*.smdh
+*.o
+*.a
+*.map
+
+# Emulator / runtime artefacts
+*.log
+build3ds/.emulator-pool/
+user-test.*
+
+# OS / editors
+.DS_Store
+.vscode/
+.idea/
+__pycache__/
+*.pyc
+.venv/
+venv/

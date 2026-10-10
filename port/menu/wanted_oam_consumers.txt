@@ -1,0 +1,24 @@
+# Explicitly reviewed overlay6 OamAttr consumers; not a list of arbitrary data.
+# Bob-omb Squad descriptor tables and direct descriptors.
+data_ov006_02133e10
+data_ov006_02133e7c
+data_ov006_02136e0c
+data_ov006_021375f4
+data_ov006_0213ac24
+data_ov006_02136b80
+data_ov006_02136cd4
+data_ov006_02137614
+# Amida descriptor table.
+data_ov006_0213a35c
+
+# Whole ov6 physical storage; additional source-audited Poker consumers.
+data_ov006_02133810
+data_ov006_02134010
+data_ov006_02134028
+data_ov006_0213406c
+data_ov006_02134fdc
+data_ov006_02135018
+data_ov006_0213509c
+data_ov006_02136974
+data_ov006_021369b0
+data_ov006_021369ec

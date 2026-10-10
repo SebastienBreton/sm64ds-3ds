@@ -1,0 +1,4 @@
+[submodule "sm64ds-decomp"]
+	path = sm64ds-decomp
+	url = https://github.com/SebastienBreton/sm64ds-decomp.git
+	branch = 3ds-port

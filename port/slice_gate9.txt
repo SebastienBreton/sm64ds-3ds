@@ -1,0 +1,275 @@
+# Gate-9 slice: the actor framework -- a real actor (daObjYajirusi_c)
+# spawns through its factory, initializes, behaves and renders through
+# vtable dispatch. Sits on the full prior stack.
+
+# daObjYajirusi_c is one production translation unit; the factory,
+# InitResources, CleanupResources, Behavior and Render this slice
+# used to name separately all live in it.
+src/actors/daObjYajirusi_c.cpp
+# dBgActor_c is one production translation unit; the constructor,
+# UpdateClsnPosAndRot, UpdateModelPosAndRotY and IsClsnInRangeOnScreen
+# this slice used to name separately all live in it.
+src/actors/dBgActor_c.cpp
+src/_ZN8dActor_cC2Ev.cpp
+# SceneNode's constructor and Reset now share their production translation unit.
+src/actors/ActorBase_SceneNode.cpp
+src/func_0203b438.c
+# fBase_c is one production translation unit; operator new, the framework
+# hook virtuals and the helper at 0x02043810 this slice used to name
+# separately all live in it.
+# ActorBase.cpp is compiled through GATE9_GEN (MMIO-transformed) only.
+src/_ZN11ShadowModelC1Ev.cpp
+src/_ZN10dBgW_KcMbgC1Ev.cpp
+src/_ZN4dBgW7DisableEv.cpp
+src/_ZN4dBgW9IsEnabledEv.cpp
+src/_ZN10dBgW_KcMbg7SetFileEP8KCL_FileRK9Matrix4x35Fix12IiEsR10CLPS_Block.c
+src/_ZN8dActor_c9SetRangesE5Fix12IiES1_S1_S1_.cpp
+src/_ZN9ModelBase7SetFileEP8BMD_Fileii.cpp
+src/func_02039394.c
+src/func_020393a4.c
+src/func_020393f0.c
+src/func_02039404.c
+src/InvMat4x3.c
+src/func_02039e18.c
+src/func_02053200.c
+src/_ZN7dBgW_KcC2Ev.cpp
+src/_ZN10dBgW_KcMbg9TransformERK9Matrix4x3s.cpp
+src/func_0203b244.c
+src/LenVec3.c
+src/func_020396d0.c
+src/_ZN8dActor_c13ClosestPlayerEv.cpp
+src/Matrix4x3_FromRotationY.c
+src/func_01ffb07c.cpp
+src/func_01ffb098.cpp
+src/func_01ffb0a4.cpp
+src/func_01ffb0b0.cpp
+src/func_01ffb0bc.cpp
+src/func_01ffb0c8.cpp
+src/func_020393fc.c
+src/func_020395fc.c
+# The fBase_c framework hook virtuals are already covered above by
+# src/actors/ActorBase.cpp, the single translation unit that defines them.
+src/func_0203b27c.c
+src/func_0204405c.c
+src/func_0203b3c0.c
+src/func_02044334.cpp
+src/func_0204424c.c
+src/MulVec3Mat4x3.c
+src/func_0203b2ec.c
+src/func_02044284.cpp
+src/func_0203b20c.c
+
+# Virtuals the host now needs as real methods: migrating a constructor to
+# real C++ makes its TU the vtable's key function on MSVC too, and MSVC
+# emits the vtable there -- which requires every virtual to be defined, not
+# just the ones a gate happens to exercise. These already existed in src/;
+# they were simply never sliced.
+
+# dBgW's non-virtual accessors: these were always sliced here. They are not
+# part of the vtable and have nothing to do with the constructor migration.
+src/_ZN4dBgW7DisableEv.cpp
+src/_ZN4dBgW9IsEnabledEv.cpp
+src/_ZN4dBgW6EnableEP8dActor_c.cpp
+
+# Native actor lifecycle dependencies from the consolidated translation units.
+src/_ZN9fLiNdBa_cD1Ev.cpp
+src/_ZN11fLiNdBaPr_cD1Ev.cpp
+src/Vec3_Add.c
+src/Vec3_Asr.c
+src/Vec3_HorzAngle.c
+src/Matrix4x3_FromTranslation.c
+src/Matrix4x3_ApplyInPlaceToTranslation.c
+src/Matrix4x3_ApplyInPlaceToRotationZXYExt.c
+src/DecIfAbove0_Byte.c
+src/_ZN4Heap28InitializeSolidHeapAsDefaultEjPS_i.cpp
+src/_ZN4Heap20RestoreFromTemporaryEv.cpp
+src/_ZN4Heap21MaxAllocationUnitSizeEv.cpp
+src/_ZN4Heap11ResizeToFitEv.cpp
+src/_ZN4Heap23SetupSolidHeapAsDefaultEjPS_i.cpp
+src/_ZN4Heap15CreateSolidHeapEjPS_i.cpp
+src/_ZN4Heap6RescueEv.cpp
+src/_ZN4Heap10SetDefaultEv.cpp
+src/Matrix4x3_FromRotationX.c
+src/Matrix4x3_FromRotationZ.c
+src/_ZN4cstd5atan2E5Fix12IiES1_.c
+src/_ZN9dBgCh_LinC1Ev.cpp
+src/_ZN9dBgCh_LinD1Ev.cpp
+src/_ZN9dBgCh_Lin10DetectClsnEv.cpp
+src/_ZN9dBgCh_Lin13SetObjAndLineERK7Vector3S2_P8dActor_c.cpp
+src/_ZN8dActor_c9UpdatePosEP5dCc_c.cpp
+src/_ZN8dActor_c10PoofDustAtERK7Vector3.cpp
+src/_ZN8dActor_c19DisappearPoofDustAtERK7Vector3.cpp
+# The Earthquake veneer uses port/unmatched/actor_earthquake.cpp for its native ABI.
+src/_ZN8Particle6System9NewSimpleEj5Fix12IiES2_S2_.c
+src/_ZN5Sound9PlayBank3EjRK7Vector3.cpp
+src/func_02012694.cpp
+# Player.cpp is compiled through GATE9_GEN with GNU local-extern aliases.
+src/GiveLives.c
+src/_ZN4Heap24CreateSolidHeapAllocatorEPvjj.cpp
+src/_ZN5Sound4PlayEjjRK7Vector3.cpp
+src/_ZN5dBgChC2Ev.cpp
+src/_ZN5dBgChD2Ev.cpp
+src/_ZN5dBgPiC2Ev.cpp
+src/_ZN5dBgPiD2Ev.cpp
+src/_ZN8Particle7Manager9AddSystemEiR7Vector3.cpp
+src/_ZN8dActor_c22UpdatePosWithOnlySpeedEP5dCc_c.cpp
+src/_ZN8dActor_c28UpdatePosWithHorzSpeedAndAngEv.cpp
+src/_ZN8dActor_c5SpawnEjjRK7Vector3PK10Vector3_16as.cpp
+src/actors/dM3dGLin.cpp
+src/_ZN8dM3dGSphC1Ev.cpp
+src/_ZN8dM3dGSphD1Ev.cpp
+src/_ZN9SolidHeapC1EPvjP4HeapP18SolidHeapAllocator.cpp
+src/func_0200d8c8.c
+src/func_02035354.c
+src/func_020353b0.c
+src/func_02037608.c
+src/func_02037fec.c
+src/func_0203938c.c
+src/func_0203939c.c
+src/func_020393ac.c
+src/func_020393b4.c
+src/func_0203abd4.c
+src/actors/daObj1UpLogo_c.cpp
+src/AddVec3.c
+src/Player_PlaySoundEffect.c
+src/_ZN18SolidHeapAllocatorC1EPvj.cpp
+# ActorDerived native argument forwarding is in unmatched/actor_spawn.cpp
+src/func_02010da4.c
+src/func_02010e78.c
+src/func_02037f5c.c
+src/func_020380c0.c
+src/func_0203abcc.c
+src/func_0203ac00.c
+src/func_02048720.c
+src/func_02048908.c
+src/func_02048a1c.c
+src/func_02048d80.c
+src/func_0204ae2c.c
+src/func_0204d958.c
+src/func_0204d9a0.c
+src/func_02050cdc.c
+src/func_ov002_020fea4c.c
+src/func_ov002_020fea68.c
+src/_ZN9SolidHeap10VGetNodeIDEv.cpp
+src/_ZN9SolidHeap10VSetNodeIDEj.cpp
+src/_ZN9SolidHeap11VDeallocateEPv.cpp
+src/_ZN9SolidHeap11VMemoryLeftEv.cpp
+src/_ZN9SolidHeap11VReallocateEPvj.cpp
+src/_ZN9SolidHeap12VResizeToFitEv.cpp
+src/_ZN9SolidHeap14VDeallocateAllEv.cpp
+src/_ZN9SolidHeap19VMaxAllocatableSizeEv.cpp
+src/_ZN9SolidHeap22VMaxAllocationUnitSizeEv.cpp
+src/_ZN9SolidHeap7VIntactEv.cpp
+src/_ZN9SolidHeap7VRescueEv.cpp
+src/_ZN9SolidHeap7VSizeofEPv.cpp
+src/_ZN9SolidHeap8VDestroyEv.cpp
+src/_ZN9SolidHeap9VAllocateEji.cpp
+src/_ZN9SolidHeapD1Ev.cpp
+
+src/_ZN18SolidHeapAllocator10MemoryLeftEi.cpp
+src/_ZN18SolidHeapAllocator10ReallocateEPvj.cpp
+src/_ZN18SolidHeapAllocator14TryResizeToFitEv.cpp
+src/_ZN18SolidHeapAllocator5ResetEj.cpp
+src/_ZN18SolidHeapAllocator8AllocateEji.cpp
+src/_ZN4Heap10ReallocateEPvj.cpp
+src/func_02049018.c
+src/func_0204ebb8.c
+src/func_0204f7cc.c
+src/func_0204f924.c
+src/func_0204f934.c
+src/func_0204fa2c.c
+src/func_020509b0.c
+src/func_02050c14.cpp
+src/func_02051e60.c
+src/func_02051f1c.c
+src/func_020523e0.c
+
+src/_ZN18SolidHeapAllocator10ResetStartEv.cpp
+src/_ZN18SolidHeapAllocator16AllocateForwardsEPvjj.cpp
+src/_ZN18SolidHeapAllocator17AllocateBackwardsEPvjj.cpp
+src/_ZN18SolidHeapAllocator8ResetEndEv.cpp
+src/func_0204f5a0.c
+src/func_02051a98.c
+src/func_0205acac.c
+
+src/_ZN5Sound23InfoInstrumentBankEntry9GetWithIDEj.cpp
+src/func_02043098.c
+src/func_0204f214.cpp
+src/func_0204f3e0.c
+src/func_0204f600.c
+src/func_0204f630.c
+src/func_0204f63c.cpp
+src/func_0204f6f8.c
+src/func_0204f89c.c
+src/func_0204f914.c
+src/func_02050b4c.cpp
+src/func_02052494.c
+src/func_0205a8f0.c
+src/func_0205b78c.c
+
+src/func_02043060.c
+src/func_02043180.c
+src/func_020433b8.c
+
+src/func_0204335c.c
+
+src/Snd_SendCommand.c
+src/func_0204f2d4.c
+src/func_0204f364.c
+src/func_0204f400.c
+src/func_0204f460.c
+src/func_0204f4bc.c
+src/func_02052458.c
+src/func_0205ad24.c
+src/func_0205ad98.c
+src/func_0205adc4.c
+src/func_0205afb4.c
+
+src/func_020524c4.c
+src/func_0205a924.c
+src/func_0205b1a4.c
+src/func_0205b1d8.c
+
+src/func_020587dc.c
+src/func_0205adf8.c
+src/func_0205ae30.c
+src/func_0205af00.c
+src/func_0205b070.c
+src/func_0205b274.c
+
+src/func_0205af20.c
+src/func_0205af4c.c
+src/func_0205b5d4.c
+
+src/_ZN8dActor_c19BeforeInitResourcesEv.cpp
+src/_ZN8dActor_c18AfterInitResourcesEj.cpp
+
+src/_ZN8dActor_c18GetBitInDeathTableEv.cpp
+
+src/DeathTable_GetBit.c
+src/GetLevelPart.c
+
+src/_ZN8dActor_c14BeforeBehaviorEv.cpp
+src/_ZN8dActor_c13AfterBehaviorEj.cpp
+src/_ZN8dActor_c12BeforeRenderEv.cpp
+src/_ZN8dActor_c11AfterRenderEj.cpp
+src/func_0204322c.c
+src/func_02043288.c
+
+src/IsAreaShowing.c
+src/_ZN7Clipper13Func_020150E8ER7Vector35Fix12IiEPh.cpp
+src/_ZN7Clipper13Func_020156DCEitii.cpp
+src/_ZN7Clipper13Func_0201559CEv.cpp
+
+src/CrossVec3.c
+
+src/__sinit_02075154.c
+src/func_02044120.c
+src/func_02043fdc.cpp
+src/func_020441cc.cpp
+src/func_020432e4.c
+src/func_0204302c.c
+
+src/func_0203b394.c
+
+src/func_0203b358.c

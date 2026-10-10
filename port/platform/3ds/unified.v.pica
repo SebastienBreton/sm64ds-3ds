@@ -1,0 +1,360 @@
+; Private native object-space spike: CPU DS fixed matrix combination and light,
+; indexed object positions, compact palette (16 matrices, 70 float4 uniforms).
+.fvec fix[4], stereo, object[64], texdims
+; DS fog (W-buffer depth): u = w*fogp.x + fogp.y indexes the density texture
+; (texture unit 1, levels-render), v = fogp.z.
+.fvec fogp
+; gpu-geometry-ingame: DS lighting of compiled-BMD lit vertices (SM64DS_GX_GPU_INGAME
+; bit 2). A lit vertex carries its transformed normal (DS NORMAL x vector matrix,
+; signed .9) packed 10:10:10 (+512) in the colour bytes with A < 255; the
+; lighting state of its occurrence is uploaded per batch (same formula and
+; uniform layout as gx_gpu.v.pica, gpu-geometry-menu).
+.fvec lbase          ; rgb: emission + sum(ambient*light/32), DS 5-bit units
+.fvec ldir[4]        ; xyz: DS light vector (s.9), w: specular reciprocal
+.fvec ldif[4]        ; rgb: diffuse*light/(32*512)
+.fvec lspe[4]        ; rgb: specular*light/(32*512)
+.bool ds_snap ; snap DS-resolution menu passes to the DS integer viewport grid
+.bool light1
+.bool light2
+.bool light3
+.constf kd(0.25, 0.0625, 4.0, 16.0)
+.constf ke(256.0, 64.0, 512.0, 511.0)
+.constf kl(0.001953125, 0.0009765625, 0.00390625, 0.00048828125) ; 1/512, 1/1024, 1/256, eps
+.constf kw(8192.0, 0.00006103515625, 16384.0, 1024.0) ; DS signed14 wrap of the specular term, square & 1023
+.constf constants(0.000244140625, 0.00392156862745, 0.5, 1.0)
+.constf grid(128.0, 96.0, 0.0078125, 0.0104166666666667)
+.constf quant(4096.0, 8.0, 254.5, 0.0) ; x: fixed12 scale; y, z: lit colour widening, lit-flag threshold
+.constf pixel(0.00390625, -0.00520833333333, 2048.0, 0.00048828125) ; zw: DS signed11 wrap (lighting)
+; Pass-through snapping: inputs are already +0.5 px (pixel centres). See vshader.v.pica.
+.constf snapc(-0.4921875, 0.46875, 1.015625, 0.0)
+.constf colc(31.0, 16.0, 15.0, 0.00196078431372549)
+; Real PICA (New 3DS) never completes a command list when a shader leaves
+; components of an output register unwritten (Azahar does not care): every
+; output register is written in full (xyzw), unused components as 0.
+.out outpos position
+.out outclr color
+.out outtc0 texcoord0
+.out outtc1 texcoord1
+.alias inpos v0
+.alias inclr v1
+.alias intex v2
+.alias inmat v3
+.constf consts(0.5, 0.0, 1.0, 0.0)
+.alias half consts.xxxx
+.bool native_mode
+.proc main
+ ifu native_mode
+ mul r2.xyz, constants.xxxx, inpos
+ mov r2.w, constants.wwww
+ mova a0.x, inmat.xxxx
+ dp4 r0.x, object[a0.x], r2
+ dp4 r0.y, object[a0.x+1], r2
+ dp4 r0.z, object[a0.x+2], r2
+ dp4 r0.w, object[a0.x+3], r2
+ ; Diagnostic fixed12 output truncation, after float24 DP4.
+ ; This cannot restore precision already lost during DP4.
+ mul r0, quant.xxxx, r0
+ flr r0, r0
+ mul r0, constants.xxxx, r0
+ ; DISCRIMINATING CANDIDATE ONLY: full 256x192 viewport, positive W,
+ ; complete triangles inside near/far. PICA clips AFTER this shader, so this
+ ; is NOT parity for the CPU clip-then-floor crossing-plane path.
+ ; RCP precision and near-integer boundaries require native validation.
+ rcp r3.x, r0.wwww
+ mul r4.xy, r0, r3.xxxx
+ add r4.x, constants.wwww, r4.xxxx
+ add r4.y, constants.wwww, -r4.yyyy
+ mul r4.xy, grid, r4
+ flr r4.xy, r4
+ mul r4.xy, grid.zwww, r4
+ add r4.x, -constants.wwww, r4.xxxx
+ add r4.y, constants.wwww, -r4.yyyy
+ ; Only vertices inside the DS near/far volume with w > 0 snap (every vertex
+ ; of a CPU-classified inside triangle); PICA clips the others unsnapped.
+ mul r4.xy, r4, r0.wwww
+ add r4.xy, r4, -r0
+ slt r5.x, consts.yyyy, r0.wwww
+ add r5.y, r0.wwww, r0.zzzz
+ sge r5.y, r5.yyyy, consts.yyyy
+ add r5.z, r0.wwww, -r0.zzzz
+ sge r5.z, r5.zzzz, consts.yyyy
+ mul r5.x, r5.xxxx, r5.yyyy
+ mul r5.x, r5.xxxx, r5.zzzz
+ mul r4.xy, r5.xxxx, r4
+ add r0.xy, r0, r4
+ ; One half DS pixel only; UV and W remain unchanged.
+ mul r3.xy, pixel, r0.wwww
+ add r0.xy, r0, r3
+ mul r1.x, stereo.xxxx, r0.wwww
+ add r1.x, stereo.yyyy, r1.xxxx
+ mul r1.z, stereo.wwww, r0.wwww
+ min r1.x, r1.xxxx, r1.zzzz
+ max r1.x, r1.xxxx, -r1.zzzz
+ add r0.x, r0.xxxx, r1.xxxx
+ add r1.z, r0.zzzz, -r0.wwww
+ mul r0.z, constants.zzzz, r1.zzzz
+ dp4 outpos.x, fix[0], r0
+ dp4 outpos.y, fix[1], r0
+ dp4 outpos.z, fix[2], r0
+ dp4 outpos.w, fix[3], r0
+ cmp quant.zz, gt, gt, inclr.ww
+ ifc cmp.x
+	; unpack the 10:10:10 normal from the colour bytes (x, y, z, w)
+	mul r11.y, kd.xxxx, inclr.yyyy
+	mul r11.z, kd.yyyy, inclr.zzzz
+	flr r11.yz, r11
+	mul r12.y, kd.zzzz, r11.yyyy
+	mul r12.z, kd.wwww, r11.zzzz
+	add r12.yz, inclr, -r12
+	mul r2.x, ke.xxxx, r12.yyyy
+	add r2.x, inclr.xxxx, r2.xxxx
+	mul r2.y, ke.yyyy, r12.zzzz
+	add r2.y, r11.yyyy, r2.yyyy
+	mul r2.z, kd.wwww, inclr.wwww
+	add r2.z, r11.zzzz, r2.zzzz
+	add r2.xyz, -ke.zzzz, r2.xyzz
+	mov r7, lbase
+	; light 0 (disabled lights have zero diffuse/specular)
+	mul r3.xyz, ldir[0], r2
+	mul r3.xyz, kl.xxxx, r3
+	flr r3.xyz, r3
+	add r4.x, r3.xxxx, r3.yyyy
+	add r4.x, r4.xxxx, r3.zzzz
+	slt r4.y, consts.yyyy, r4.xxxx
+	add r4.z, r4.xxxx, r2.zzzz
+	mul r5.w, pixel.wwww, r4.zzzz
+	add r5.w, consts.xxxx, r5.wwww
+	flr r5.w, r5.wwww
+	mul r5.w, pixel.zzzz, r5.wwww
+	add r4.z, r4.zzzz, -r5.wwww
+	mul r4.w, r4.zzzz, r4.zzzz
+	mul r4.w, kl.yyyy, r4.wwww
+	flr r4.w, r4.wwww
+	mul r5.w, kl.yyyy, r4.wwww
+	flr r5.w, r5.wwww
+	mul r5.w, kw.wwww, r5.wwww
+	add r4.w, r4.wwww, -r5.wwww
+	mul r4.w, ldir[0].wwww, r4.wwww
+	mul r4.w, kl.zzzz, r4.wwww
+	flr r4.w, r4.wwww
+	add r4.w, -ke.zzzz, r4.wwww
+	max r4.w, consts.yyyy, r4.wwww
+	add r5.w, kw.xxxx, r4.wwww
+	mul r5.w, kw.yyyy, r5.wwww
+	flr r5.w, r5.wwww
+	mul r5.w, kw.zzzz, r5.wwww
+	add r4.w, r4.wwww, -r5.wwww
+	max r4.w, consts.yyyy, r4.wwww
+	min r4.w, ke.wwww, r4.wwww
+	mul r4.xw, r4.yyyy, r4.xxxw
+	mul r5.xyz, ldif[0], r4.xxxx
+	add r7.xyz, r7.xyzz, r5.xyzz
+	mul r5.xyz, lspe[0], r4.wwww
+	add r7.xyz, r7.xyzz, r5.xyzz
+	ifu light1
+		mul r3.xyz, ldir[1], r2
+		mul r3.xyz, kl.xxxx, r3
+		flr r3.xyz, r3
+		add r4.x, r3.xxxx, r3.yyyy
+		add r4.x, r4.xxxx, r3.zzzz
+		slt r4.y, consts.yyyy, r4.xxxx
+		add r4.z, r4.xxxx, r2.zzzz
+		mul r5.w, pixel.wwww, r4.zzzz
+		add r5.w, consts.xxxx, r5.wwww
+		flr r5.w, r5.wwww
+		mul r5.w, pixel.zzzz, r5.wwww
+		add r4.z, r4.zzzz, -r5.wwww
+		mul r4.w, r4.zzzz, r4.zzzz
+		mul r4.w, kl.yyyy, r4.wwww
+		flr r4.w, r4.wwww
+		mul r5.w, kl.yyyy, r4.wwww
+		flr r5.w, r5.wwww
+		mul r5.w, kw.wwww, r5.wwww
+		add r4.w, r4.wwww, -r5.wwww
+		mul r4.w, ldir[1].wwww, r4.wwww
+		mul r4.w, kl.zzzz, r4.wwww
+		flr r4.w, r4.wwww
+		add r4.w, -ke.zzzz, r4.wwww
+		max r4.w, consts.yyyy, r4.wwww
+		add r5.w, kw.xxxx, r4.wwww
+		mul r5.w, kw.yyyy, r5.wwww
+		flr r5.w, r5.wwww
+		mul r5.w, kw.zzzz, r5.wwww
+		add r4.w, r4.wwww, -r5.wwww
+		max r4.w, consts.yyyy, r4.wwww
+		min r4.w, ke.wwww, r4.wwww
+		mul r4.xw, r4.yyyy, r4.xxxw
+		mul r5.xyz, ldif[1], r4.xxxx
+		add r7.xyz, r7.xyzz, r5.xyzz
+		mul r5.xyz, lspe[1], r4.wwww
+		add r7.xyz, r7.xyzz, r5.xyzz
+	.end
+	ifu light2
+		mul r3.xyz, ldir[2], r2
+		mul r3.xyz, kl.xxxx, r3
+		flr r3.xyz, r3
+		add r4.x, r3.xxxx, r3.yyyy
+		add r4.x, r4.xxxx, r3.zzzz
+		slt r4.y, consts.yyyy, r4.xxxx
+		add r4.z, r4.xxxx, r2.zzzz
+		mul r5.w, pixel.wwww, r4.zzzz
+		add r5.w, consts.xxxx, r5.wwww
+		flr r5.w, r5.wwww
+		mul r5.w, pixel.zzzz, r5.wwww
+		add r4.z, r4.zzzz, -r5.wwww
+		mul r4.w, r4.zzzz, r4.zzzz
+		mul r4.w, kl.yyyy, r4.wwww
+		flr r4.w, r4.wwww
+		mul r5.w, kl.yyyy, r4.wwww
+		flr r5.w, r5.wwww
+		mul r5.w, kw.wwww, r5.wwww
+		add r4.w, r4.wwww, -r5.wwww
+		mul r4.w, ldir[2].wwww, r4.wwww
+		mul r4.w, kl.zzzz, r4.wwww
+		flr r4.w, r4.wwww
+		add r4.w, -ke.zzzz, r4.wwww
+		max r4.w, consts.yyyy, r4.wwww
+		add r5.w, kw.xxxx, r4.wwww
+		mul r5.w, kw.yyyy, r5.wwww
+		flr r5.w, r5.wwww
+		mul r5.w, kw.zzzz, r5.wwww
+		add r4.w, r4.wwww, -r5.wwww
+		max r4.w, consts.yyyy, r4.wwww
+		min r4.w, ke.wwww, r4.wwww
+		mul r4.xw, r4.yyyy, r4.xxxw
+		mul r5.xyz, ldif[2], r4.xxxx
+		add r7.xyz, r7.xyzz, r5.xyzz
+		mul r5.xyz, lspe[2], r4.wwww
+		add r7.xyz, r7.xyzz, r5.xyzz
+	.end
+	ifu light3
+		mul r3.xyz, ldir[3], r2
+		mul r3.xyz, kl.xxxx, r3
+		flr r3.xyz, r3
+		add r4.x, r3.xxxx, r3.yyyy
+		add r4.x, r4.xxxx, r3.zzzz
+		slt r4.y, consts.yyyy, r4.xxxx
+		add r4.z, r4.xxxx, r2.zzzz
+		mul r5.w, pixel.wwww, r4.zzzz
+		add r5.w, consts.xxxx, r5.wwww
+		flr r5.w, r5.wwww
+		mul r5.w, pixel.zzzz, r5.wwww
+		add r4.z, r4.zzzz, -r5.wwww
+		mul r4.w, r4.zzzz, r4.zzzz
+		mul r4.w, kl.yyyy, r4.wwww
+		flr r4.w, r4.wwww
+		mul r5.w, kl.yyyy, r4.wwww
+		flr r5.w, r5.wwww
+		mul r5.w, kw.wwww, r5.wwww
+		add r4.w, r4.wwww, -r5.wwww
+		mul r4.w, ldir[3].wwww, r4.wwww
+		mul r4.w, kl.zzzz, r4.wwww
+		flr r4.w, r4.wwww
+		add r4.w, -ke.zzzz, r4.wwww
+		max r4.w, consts.yyyy, r4.wwww
+		add r5.w, kw.xxxx, r4.wwww
+		mul r5.w, kw.yyyy, r5.wwww
+		flr r5.w, r5.wwww
+		mul r5.w, kw.zzzz, r5.wwww
+		add r4.w, r4.wwww, -r5.wwww
+		max r4.w, consts.yyyy, r4.wwww
+		min r4.w, ke.wwww, r4.wwww
+		mul r4.xw, r4.yyyy, r4.xxxw
+		mul r5.xyz, ldif[3], r4.xxxx
+		add r7.xyz, r7.xyzz, r5.xyzz
+		mul r5.xyz, lspe[3], r4.wwww
+		add r7.xyz, r7.xyzz, r5.xyzz
+	.end
+	; DS: accumulate in 1/16384 units, >>14, saturate at 31
+	add r7.xyz, kl.wwww, r7.xyzz
+	flr r7.xyz, r7.xyzz
+	min r7.xyz, colc.xxxx, r7.xyzz
+	; bgr555_to_argb: (c<<3 | c>>2) / 255
+	mul r8.xyz, kd.xxxx, r7.xyzz
+	flr r8.xyz, r8.xyzz
+	mul r6.xyz, quant.yyyy, r7.xyzz
+	add r6.xyz, r6.xyzz, r8.xyzz
+	mul r6.xyz, constants.yyyy, r6.xyzz
+	mov r6.w, constants.wwww
+	mov outclr, r6
+ .else
+	mul outclr, constants.yyyy, inclr.zyxw
+ .end
+ mul r13.xy, texdims, intex
+ mov r13.zw, consts.yyyy
+ mov outtc0, r13
+ mul r9.x, fogp.xxxx, r0.wwww
+ add r9.x, fogp.yyyy, r9.xxxx
+ mov r9.y, fogp.zzzz
+ mov r9.zw, consts.yyyy
+	mov outtc1, r9
+  .else
+	mov r0, inpos
+	; DS truncates (x/w+1)*128 and (1-y/w)*96 to integer pixels (melonDS
+	; GPU3D viewport transform). Bool uniform: false (default) leaves other passes unchanged.
+	ifu ds_snap
+	rcp r3.x, inpos.wwww
+	mul r4.xy, inpos.xyyy, r3.xxxx
+	; Only on-screen vertices: DS clips before its viewport transform, so a
+	; vertex outside the screen never reaches the DS integer grid itself.
+	max r5.xy, r4.xyyy, -r4.xyyy
+	max r5.x, r5.xxxx, r5.yyyy
+	sge r5.x, snapc.zzzz, r5.xxxx
+	slt r5.y, consts.yyyy, inpos.wwww
+	mul r5.x, r5.xxxx, r5.yyyy
+	add r4.x, consts.zzzz, r4.xxxx
+	add r4.y, consts.zzzz, -r4.yyyy
+	mul r4.xy, grid.xyyy, r4.xyyy
+	add r4.xy, snapc.xxxx, r4.xyyy
+	flr r4.xy, r4.xyyy
+	add r4.xy, snapc.yyyy, r4.xyyy
+	mul r4.xy, grid.zwww, r4.xyyy
+	add r4.x, -consts.zzzz, r4.xxxx
+	add r4.y, consts.zzzz, -r4.yyyy
+	mul r4.xy, inpos.wwww, r4.xyyy
+	add r4.xy, -inpos.xyyy, r4.xyyy
+	mul r4.xy, r5.xxxx, r4.xyyy
+	add r0.xy, inpos.xyyy, r4.xyyy
+	.end
+	; stereo parallax in DS screen space
+	mul r1.x, stereo.xxxx, inpos.wwww
+	add r1.x, stereo.yyyy, r1.xxxx
+	mul r1.y, stereo.zzzz, inpos.zzzz
+	add r1.x, r1.xxxx, r1.yyyy
+	; Clip scales can differ greatly between cutscenes and world geometry.
+	; Bound disparity per eye instead of letting near vertices leave the screen.
+	mul r1.z, stereo.wwww, inpos.wwww
+	min r1.x, r1.xxxx, r1.zzzz
+	max r1.x, r1.xxxx, -r1.zzzz
+	add r0.x, r0.xxxx, r1.xxxx
+	; depth: z' = (z - w) / 2
+	add r1.z, inpos.zzzz, -inpos.wwww
+	mul r0.z, half, r1.zzzz
+	dp4 outpos.x, fix[0], r0
+	dp4 outpos.y, fix[1], r0
+	dp4 outpos.z, fix[2], r0
+	dp4 outpos.w, fix[3], r0
+	mov r7, inclr
+	ifu ds_snap
+	; DS widens five-bit vertex colours to nine bits as (c<<4)+15 (c>0) and
+	; keeps the top six; the native composite keeps the top six of eight.
+	mul r6.xyz, colc.xxxx, inclr.xyzz
+	add r6.xyz, consts.xxxx, r6.xyzz
+	flr r6.xyz, r6.xyzz
+	mul r7.xyz, colc.yyyy, r6.xyzz
+	add r7.xyz, colc.zzzz, r7.xyzz
+	slt r8.xyz, consts.yyyy, r6.xyzz
+	mul r7.xyz, r8.xyzz, r7.xyzz
+	mul r7.xyz, colc.wwww, r7.xyzz
+	min r7.xyz, consts.zzzz, r7.xyzz
+	.end
+	mov outclr, r7
+	mov outtc0, intex
+	mul r9.x, fogp.xxxx, inpos.wwww
+	add r9.x, fogp.yyyy, r9.xxxx
+	mov r9.y, fogp.zzzz
+	mov r9.zw, consts.yyyy
+	mov outtc1, r9
+	 .end
+ end
+.end

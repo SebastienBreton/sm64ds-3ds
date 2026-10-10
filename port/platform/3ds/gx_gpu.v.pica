@@ -1,0 +1,236 @@
+; GPU geometry mode (gpu-geometry-menu): the DS geometry engine's per-vertex
+; work on the PICA200. The CPU recorded model-space vertices, the fixed12 clip
+; matrix of each matrix state, exact DS texcoords and the exact transformed
+; normal (signed .9, DS NORMAL x vector matrix). This shader performs
+;   1. clip = (x, y, z, w) x clip matrix (palette entry selected per vertex),
+;   2. the DS viewport transform with its integer pixel truncation and the
+;      PICA pixel-centre offset (exactly what the CPU Builder + vshader did),
+;   3. DS lighting: per light d = sum(trunc(L*N/512)), specular from the
+;      halfway term with the DS reciprocal, colour accumulation in DS 5-bit
+;      units and the final 5-bit truncation (GBATEK / melonDS formula),
+;   4. stereo parallax, depth remap and panel rotation (same as vshader).
+; Uniform layout: fix[4] and stereo occupy c0..c4 and ds_snap is b0, exactly as
+; in vshader.v.pica, so the viewer's set_fix() values apply to both programs.
+.fvec fix[4]
+.fvec stereo
+.fvec texdims          ; x = 1/(16*tw), y = 1/(16*th)
+.fvec vport            ; DS viewport: width/2, x, height/2, y
+.fvec base             ; rgb: emission + sum(ambient*light/32), DS 5-bit units
+.fvec ldir[4]          ; xyz: DS light vector (s.9, LIGHT_VECTOR negated), w: specular reciprocal
+.fvec ldif[4]          ; rgb: diffuse*light/(32*512)
+.fvec lspe[4]          ; rgb: specular*light/(32*512)
+.fvec pal[64]          ; 16 clip matrices, 4 columns each: xyz scaled 1/4096^2, w 1/4096
+.bool ds_snap          ; b0: DS-resolution menu pass (same register as vshader)
+.bool light1
+.bool light2
+.bool light3
+
+.constf k0(0.0, 1.0, 0.5, 512.0)
+.constf k1(0.001953125, 0.0009765625, 0.00390625, 511.0) ; 1/512, 1/1024, 1/256, 511
+.constf k2(31.0, 8.0, 0.25, 0.0039215686274509803)       ; 31, 8, 1/4, 1/255
+.constf k3(128.0, 96.0, 0.0078125, 0.010416666666666666) ; DS grid and its inverse
+.constf k4(0.5, 0.03125, 1.015625, 0.00048828125)         ; pixel centre, menu snap delta, on-screen bound, eps
+.constf k5(16.0, 15.0, 0.00196078431372549, 1.0)          ; DS colour widening (vshader colc)
+
+.out outpos position
+.out outclr color
+.out outtc0 texcoord0
+
+.alias inpos v0   ; x, y, z (DS 4.12), palette slot*4
+.alias inaux v1   ; s, t (DS 12.4), lit, env
+.alias incol v2   ; lit: normal (signed .9); unlit: 5-bit r, g, b
+
+
+.proc main
+	; --- clip transform (palette entry per vertex) ---
+	mova a0.x, inpos.wwww
+	dph r0.x, inpos, pal[a0.x]
+	dph r0.y, inpos, pal[a0.x+1]
+	dph r0.z, inpos, pal[a0.x+2]
+	dph r0.w, inpos, pal[a0.x+3]
+
+	; --- DS viewport: truncate to the integer DS pixel, then the PICA pixel
+	; centre (+0.5). Only vertices inside the DS near/far volume with w > 0
+	; (the CPU path snapped exactly those; PICA clips the others).
+	rcp r3.x, r0.wwww
+	mul r4.xy, r0.xyyy, r3.xxxx             ; ndc
+	add r5.x, k0.yyyy, r4.xxxx
+	add r5.y, k0.yyyy, -r4.yyyy
+	mul r5.xy, vport.xzzz, r5.xyyy
+	add r5.xy, vport.ywww, r5.xyyy          ; DS screen position (viewport)
+	flr r5.xy, r5.xyyy
+	mov r6.x, k4.xxxx                       ; +0.5 pixel centre
+	ifu ds_snap
+		; vshader ds_snap: on-screen vertices sit 1/32 px before the centre.
+		mul r8.xy, k3.zwww, r5.xyyy
+		add r8.xy, -k0.yyyy, r8.xyyy
+		max r8.xy, r8.xyyy, -r8.xyyy
+		max r8.x, r8.xxxx, r8.yyyy
+		sge r8.x, k4.zzzz, r8.xxxx
+		mul r8.x, k4.yyyy, r8.xxxx
+		add r6.x, r6.xxxx, -r8.xxxx
+	.end
+	add r5.xy, r6.xxxx, r5.xyyy
+	mul r5.xy, k3.zwww, r5.xyyy
+	add r5.x, -k0.yyyy, r5.xxxx
+	add r5.y, k0.yyyy, -r5.yyyy
+	mul r5.xy, r0.wwww, r5.xyyy             ; snapped clip x, y
+	; inside = w > 0 && -w <= z <= w
+	slt r8.x, k0.xxxx, r0.wwww
+	add r8.y, r0.wwww, r0.zzzz
+	sge r8.y, r8.yyyy, k0.xxxx
+	add r8.z, r0.wwww, -r0.zzzz
+	sge r8.z, r8.zzzz, k0.xxxx
+	mul r8.x, r8.xxxx, r8.yyyy
+	mul r8.x, r8.xxxx, r8.zzzz
+	add r5.xy, r5.xyyy, -r0.xyyy
+	mul r5.xy, r8.xxxx, r5.xyyy
+	add r0.xy, r0.xyyy, r5.xyyy
+
+	; --- stereo parallax, depth, panel transform (vshader) ---
+	mul r1.x, stereo.xxxx, r0.wwww
+	add r1.x, stereo.yyyy, r1.xxxx
+	mul r1.y, stereo.zzzz, r0.zzzz
+	add r1.x, r1.xxxx, r1.yyyy
+	mul r1.z, stereo.wwww, r0.wwww
+	min r1.x, r1.xxxx, r1.zzzz
+	max r1.x, r1.xxxx, -r1.zzzz
+	add r0.x, r0.xxxx, r1.xxxx
+	add r1.z, r0.zzzz, -r0.wwww
+	mul r0.z, k0.zzzz, r1.zzzz
+	dp4 outpos.x, fix[0], r0
+	dp4 outpos.y, fix[1], r0
+	dp4 outpos.z, fix[2], r0
+	dp4 outpos.w, fix[3], r0
+
+	; --- texture coordinates (DS 12.4 texels -> normalised) ---
+	mul r9.xy, texdims.xyyy, inaux.xyyy
+	mov r9.zw, k0.xxxx
+	mov outtc0, r9
+
+	; --- colour: 5-bit DS channels in r7.xyz ---
+	cmp k0.xx, lt, lt, inaux.zz        ; lit flag
+	ifc cmp.x
+		mov r2, incol
+		mov r7, base
+		; light 0: d = sum(trunc(L*N/512)), DS specular, accumulate
+		mul r3.xyz, ldir[0], r2
+		mul r3.xyz, k1.xxxx, r3
+		flr r3.xyz, r3
+		add r4.x, r3.xxxx, r3.yyyy
+		add r4.x, r4.xxxx, r3.zzzz          ; d = DS dot (1/512 units)
+		slt r4.y, k0.xxxx, r4.xxxx          ; d > 0
+		add r4.z, r4.xxxx, r2.zzzz          ; halfway = d + N.z
+		mul r4.w, r4.zzzz, r4.zzzz
+		mul r4.w, k1.yyyy, r4.wwww
+		flr r4.w, r4.wwww                   ; square = h*h >> 10
+		mul r4.w, ldir[0].wwww, r4.wwww
+		mul r4.w, k1.zzzz, r4.wwww
+		flr r4.w, r4.wwww                   ; (square*recip) >> 8
+		add r4.w, -k0.wwww, r4.wwww         ; - 512
+		max r4.w, k0.xxxx, r4.wwww
+		min r4.w, k1.wwww, r4.wwww          ; shine in [0, 511]
+		mul r4.xw, r4.yyyy, r4.xxxw         ; only when d > 0
+		mul r5.xyz, ldif[0], r4.xxxx
+		add r7.xyz, r7.xyzz, r5.xyzz
+		mul r5.xyz, lspe[0], r4.wwww
+		add r7.xyz, r7.xyzz, r5.xyzz
+		ifu light1
+			; light 1: d = sum(trunc(L*N/512)), DS specular, accumulate
+			mul r3.xyz, ldir[1], r2
+			mul r3.xyz, k1.xxxx, r3
+			flr r3.xyz, r3
+			add r4.x, r3.xxxx, r3.yyyy
+			add r4.x, r4.xxxx, r3.zzzz          ; d = DS dot (1/512 units)
+			slt r4.y, k0.xxxx, r4.xxxx          ; d > 0
+			add r4.z, r4.xxxx, r2.zzzz          ; halfway = d + N.z
+			mul r4.w, r4.zzzz, r4.zzzz
+			mul r4.w, k1.yyyy, r4.wwww
+			flr r4.w, r4.wwww                   ; square = h*h >> 10
+			mul r4.w, ldir[1].wwww, r4.wwww
+			mul r4.w, k1.zzzz, r4.wwww
+			flr r4.w, r4.wwww                   ; (square*recip) >> 8
+			add r4.w, -k0.wwww, r4.wwww         ; - 512
+			max r4.w, k0.xxxx, r4.wwww
+			min r4.w, k1.wwww, r4.wwww          ; shine in [0, 511]
+			mul r4.xw, r4.yyyy, r4.xxxw         ; only when d > 0
+			mul r5.xyz, ldif[1], r4.xxxx
+			add r7.xyz, r7.xyzz, r5.xyzz
+			mul r5.xyz, lspe[1], r4.wwww
+			add r7.xyz, r7.xyzz, r5.xyzz
+		.end
+		ifu light2
+			; light 2: d = sum(trunc(L*N/512)), DS specular, accumulate
+			mul r3.xyz, ldir[2], r2
+			mul r3.xyz, k1.xxxx, r3
+			flr r3.xyz, r3
+			add r4.x, r3.xxxx, r3.yyyy
+			add r4.x, r4.xxxx, r3.zzzz          ; d = DS dot (1/512 units)
+			slt r4.y, k0.xxxx, r4.xxxx          ; d > 0
+			add r4.z, r4.xxxx, r2.zzzz          ; halfway = d + N.z
+			mul r4.w, r4.zzzz, r4.zzzz
+			mul r4.w, k1.yyyy, r4.wwww
+			flr r4.w, r4.wwww                   ; square = h*h >> 10
+			mul r4.w, ldir[2].wwww, r4.wwww
+			mul r4.w, k1.zzzz, r4.wwww
+			flr r4.w, r4.wwww                   ; (square*recip) >> 8
+			add r4.w, -k0.wwww, r4.wwww         ; - 512
+			max r4.w, k0.xxxx, r4.wwww
+			min r4.w, k1.wwww, r4.wwww          ; shine in [0, 511]
+			mul r4.xw, r4.yyyy, r4.xxxw         ; only when d > 0
+			mul r5.xyz, ldif[2], r4.xxxx
+			add r7.xyz, r7.xyzz, r5.xyzz
+			mul r5.xyz, lspe[2], r4.wwww
+			add r7.xyz, r7.xyzz, r5.xyzz
+		.end
+		ifu light3
+			; light 3: d = sum(trunc(L*N/512)), DS specular, accumulate
+			mul r3.xyz, ldir[3], r2
+			mul r3.xyz, k1.xxxx, r3
+			flr r3.xyz, r3
+			add r4.x, r3.xxxx, r3.yyyy
+			add r4.x, r4.xxxx, r3.zzzz          ; d = DS dot (1/512 units)
+			slt r4.y, k0.xxxx, r4.xxxx          ; d > 0
+			add r4.z, r4.xxxx, r2.zzzz          ; halfway = d + N.z
+			mul r4.w, r4.zzzz, r4.zzzz
+			mul r4.w, k1.yyyy, r4.wwww
+			flr r4.w, r4.wwww                   ; square = h*h >> 10
+			mul r4.w, ldir[3].wwww, r4.wwww
+			mul r4.w, k1.zzzz, r4.wwww
+			flr r4.w, r4.wwww                   ; (square*recip) >> 8
+			add r4.w, -k0.wwww, r4.wwww         ; - 512
+			max r4.w, k0.xxxx, r4.wwww
+			min r4.w, k1.wwww, r4.wwww          ; shine in [0, 511]
+			mul r4.xw, r4.yyyy, r4.xxxw         ; only when d > 0
+			mul r5.xyz, ldif[3], r4.xxxx
+			add r7.xyz, r7.xyzz, r5.xyzz
+			mul r5.xyz, lspe[3], r4.wwww
+			add r7.xyz, r7.xyzz, r5.xyzz
+		.end
+		add r7.xyz, k4.wwww, r7.xyzz
+		flr r7.xyz, r7.xyzz
+		min r7.xyz, k2.xxxx, r7.xyzz
+	.else
+		mov r7, incol
+	.end
+	ifu ds_snap
+		; DS widens 5-bit colours to 9 bits as (c<<4)+15 (c>0); the native
+		; composite keeps the top six of eight (vshader colc path).
+		mul r6.xyz, k5.xxxx, r7.xyzz
+		add r6.xyz, k5.yyyy, r6.xyzz
+		slt r8.xyz, k0.xxxx, r7.xyzz
+		mul r6.xyz, r8.xyzz, r6.xyzz
+		mul r6.xyz, k5.zzzz, r6.xyzz
+		min r6.xyz, k0.yyyy, r6.xyzz
+	.else
+		; bgr555_to_argb: (c<<3 | c>>2) / 255
+		mul r8.xyz, k2.zzzz, r7.xyzz
+		flr r8.xyz, r8.xyzz
+		mul r6.xyz, k2.yyyy, r7.xyzz
+		add r6.xyz, r6.xyzz, r8.xyzz
+		mul r6.xyz, k2.wwww, r6.xyzz
+	.end
+	mov r6.w, k0.yyyy
+	mov outclr, r6
+	end
+.end

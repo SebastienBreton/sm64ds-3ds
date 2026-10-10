@@ -1,0 +1,97 @@
+Upstream: https://github.com/kode54/SSEQPlayer
+Commit: 77222d3657adff358fb4e610d3e56bb7ada8ec24
+License: LICENSE.TXT (WTFPL v2); preserve attribution in individual files.
+Local changes: replace negative constant left shift with multiplication in consts.h.
+Build renames Player/Track/Channel to avoid game symbol collisions.
+Local changes: use standard <codecvt>, avoiding legacy std type redefinitions with GCC16.
+Local changes: remove legacy codecvt facet ID definitions from Player.cpp.
+Local changes: SSAR.h/.cpp are native-port additions for bounded archive/entry parsing.
+SDAT supports SSAR entry offsets and an explicit bank override for scene sounds.
+Missing banks/wave bindings now fail explicitly instead of dereferencing null.
+Player channel allocation no longer forms channels[-1] before selecting its first candidate.
+Track rendering throws on >65536 commands without yielding; this is a diagnostic
+bound, not an implementation of Nitro zero-duration-note/loop scheduling.
+Local changes: zero-duration notes with note-wait enabled now suspend the track
+until its active channel list empties, matching ROM ARM7 02384c98/02384e3c.
+Local changes: SDATBankState retains wave bindings across aliases of the same
+SBNK file; explicit metadata bindings replace slots, FFFF preserves prior slots.
+Different file IDs reset inherited slots. Bank/wave ownership starts before Read
+so exceptions release partially parsed resources.
+Local changes: PseudoFile accepts a non-owning external byte view as well as its
+legacy vector input. The C boundary uses it for a temporary malloc-owned archive
+copy, avoiding fragmentation of the game's root heap; parsed data owns its copies.
+Local changes: END releases the track's active notes, matching the ARM7
+completion aggregator (02384c1c -> 02385968 -> 02385ab0).
+Local changes: Setup consumes the initial track-allocation mask at the selected
+entry offset. Track IDs map sixteen logical slots; OPEN_TRACK restarts only an
+existing non-self slot without resetting parameters. END frees its slot, and
+release tails detach from track ownership before reuse. Hard stop kills orphan tails.
+Local changes: PseudoFile validates scalar and byte-span reads against its buffer
+length. Setup rejects an allocation-mask-only event region without any command.
+
+Local shared-pool adaptation: optional global32-track/16-channel storage, single
+sample/clock scheduler, owner-aware stop/destruction/channel stealing, and
+release-stop detachment before track reuse. Standalone rendering preserved.
+
+Local pause adaptation: preserve sequencer position/wait/tempo and active mask,
+release attached notes with override127, and keep the shared hardware clock and
+other players running. Verified against ARM7 command02386204/scheduler023863f0.
+
+Local volume correction: initialize sequence attenuation from metadata, preserve
+explicit INFO zero volume, and propagate live external attenuation to attached
+tracks. Synthetic metadata defaults to127; runtime command0 starts at127.
+
+Local priority correction: independent player/track bytes default64; allocation
+compares their integer sum, stores the low byte, and tied notes retain their
+existing channel priority. Verified against ROM allocation and tie paths.
+
+Local external track controls: separate signed attenuation/pan/tune contributions
+and live modulation speed/depth updates for the original command4 field mapping.
+
+Local command5 adaptation: selected-track mute/release-only semantics, continuing
+event timing and portamento updates while suppressed, and native key clamping.
+
+Local command6 adaptation: per-track 16-bit channel allocation masks, default
+ffff and explicit-mask state; instrument-compatible future allocations respect
+the mask while existing/tied notes retain their channels. Global locks pending.
+
+Local sequence-variable correction: sixteen player-local variables and sixteen
+SoundPool globals shared by FROMVAR, arithmetic and comparison events. Setup
+resets locals only; stop preserves parameters/variables. Invalid indices reject
+rather than accessing outside native arrays. ROM resolver02384bd8 reference.
+
+Local lifetime adaptation: optional externally backed sixteen local variables
+let mixer slot status outlive sequence resource owners; standalone players keep
+internal storage. Stop/destruction do not reset the external status.
+
+Local tick accounting: count all scheduled ticks before event execution, retain
+per-slot counters across resource collection, reset on Setup, skip paused/inactive
+players, free unused reserved tracks at completion. ROM023859f8 reference.
+
+Local DS-fidelity corrections (2026-10-08, compared against melonDS register,
+per-channel and mixer taps; build3ds/validation/sound-fidelity-v1):
+- DS-native cadence: rate 32728 selects one output sample per 1024 ARM7
+  cycles (32728.498 Hz = 3DS NDSP_SAMPLE_RATE); sequencer clock in cycles.
+- Channel stepping uses the hardware timer model (16-bit counter, reload on
+  overflow, integer source position) instead of double increments; output
+  after the timer advance; ADPCM start delay includes the 8-nibble header.
+- Mixing uses the DS arithmetic: volume shift {4,3,2,0}, volume/pan/master
+  127 counted as 128, pan 128-p/p, 2^-10 accumulation, >>8 capture/speaker.
+- Portamento/sweep follow ARM7 02385720/02383d9c: sweep length from the note
+  length converted to hardware ticks (also for tied notes; FSS used -1 and the
+  pitch dived to timer saturation), counter per hardware tick, track sweep
+  pitch applied without portamento; tied notes take track ADSR overrides.
+- Note lengths count down in hardware ticks after each channel update
+  (ARM7 023848dc), converted from sequencer ticks at the current tempo.
+- Interpolation history is only maintained for interpolating hosts.
+- SWAR parses waves in place (no copy of the archive); SWAV::Prepare (game
+  thread, before the locked start) allocates the decoded buffer only for the
+  waves of the programs the starting sequence can reach (static scan of the
+  events from the entry, whole bank when unbounded; audio/sseq_decoder.cpp
+  sequence_programs) and parks the ADPCM/PCM8 bytes at its tail; the first
+  Samples() call (realtime renderer) decodes in place without allocating.
+  Track::NoteOn skips an unprepared wave (sm64ds_sseq_unprepared_notes, 0 on
+  every validated route). Previously every first-use archive was fully
+  decoded on the game thread (~140 ms stalls per new sound in mini-games).
+  Sinc tables built on first sinc interpolation only (~110 ms at pool
+  creation). Output unchanged.

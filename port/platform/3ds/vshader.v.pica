@@ -1,0 +1,92 @@
+; sm64ds_viewer vertex shader: the DS geometry engine already produced clip
+; coordinates on the CPU (port/ntr/gx.cpp), so this only
+;   1. adds stereo parallax: x += sep * (w - conv)   (zero at the convergence depth)
+;   2. remaps DS depth [-w, w] to PICA's [-w, 0]
+;   3. applies `fix`: aspect correction + the 90 degree panel rotation.
+.fvec fix[4]
+.fvec stereo            ; x = perspective sep, y = -sep * convergence, z = orthographic sep, w = maximum normalized shift
+.bool ds_snap           ; snap to the DS integer viewport grid (DS-resolution menu passes only)
+
+.constf consts(0.5, 0.0, 1.0, 0.0)
+; DS viewport transform for 256x192: 128/96 pixels per NDC unit and inverse.
+.constf grid(128.0, 96.0, 0.0078125, 0.0104166666666667)
+; Inputs are already moved +0.5 px to PICA pixel centres. x=-0.5+1/128 undoes
+; that (with float24 slack) before truncation, y=0.5-1/32 places the vertex just
+; before the next pixel centre so coverage is DS half-open [x0,x1) and UVs equal
+; the DS values sampled at integer pixel positions.
+.constf snapc(-0.4921875, 0.46875, 1.015625, 0.0)
+.constf colc(31.0, 16.0, 15.0, 0.00196078431372549)
+.alias half consts.xxxx
+
+.out outpos position
+.out outclr color
+.out outtc0 texcoord0
+
+.alias inpos v0
+.alias inclr v1
+.alias intex v2
+
+.proc main
+	mov r0, inpos
+	; DS truncates (x/w+1)*128 and (1-y/w)*96 to integer pixels (melonDS
+	; GPU3D viewport transform). Bool uniform: false (default) leaves other passes unchanged.
+	ifu ds_snap
+	rcp r3.x, inpos.wwww
+	mul r4.xy, inpos.xyyy, r3.xxxx
+	; Only on-screen vertices: DS clips before its viewport transform, so a
+	; vertex outside the screen never reaches the DS integer grid itself.
+	max r5.xy, r4.xyyy, -r4.xyyy
+	max r5.x, r5.xxxx, r5.yyyy
+	sge r5.x, snapc.zzzz, r5.xxxx
+	slt r5.y, consts.yyyy, inpos.wwww
+	mul r5.x, r5.xxxx, r5.yyyy
+	add r4.x, consts.zzzz, r4.xxxx
+	add r4.y, consts.zzzz, -r4.yyyy
+	mul r4.xy, grid.xyyy, r4.xyyy
+	add r4.xy, snapc.xxxx, r4.xyyy
+	flr r4.xy, r4.xyyy
+	add r4.xy, snapc.yyyy, r4.xyyy
+	mul r4.xy, grid.zwww, r4.xyyy
+	add r4.x, -consts.zzzz, r4.xxxx
+	add r4.y, consts.zzzz, -r4.yyyy
+	mul r4.xy, inpos.wwww, r4.xyyy
+	add r4.xy, -inpos.xyyy, r4.xyyy
+	mul r4.xy, r5.xxxx, r4.xyyy
+	add r0.xy, inpos.xyyy, r4.xyyy
+	.end
+	; stereo parallax in DS screen space
+	mul r1.x, stereo.xxxx, inpos.wwww
+	add r1.x, stereo.yyyy, r1.xxxx
+	mul r1.y, stereo.zzzz, inpos.zzzz
+	add r1.x, r1.xxxx, r1.yyyy
+	; Clip scales can differ greatly between cutscenes and world geometry.
+	; Bound disparity per eye instead of letting near vertices leave the screen.
+	mul r1.z, stereo.wwww, inpos.wwww
+	min r1.x, r1.xxxx, r1.zzzz
+	max r1.x, r1.xxxx, -r1.zzzz
+	add r0.x, r0.xxxx, r1.xxxx
+	; depth: z' = (z - w) / 2
+	add r1.z, inpos.zzzz, -inpos.wwww
+	mul r0.z, half, r1.zzzz
+	dp4 outpos.x, fix[0], r0
+	dp4 outpos.y, fix[1], r0
+	dp4 outpos.z, fix[2], r0
+	dp4 outpos.w, fix[3], r0
+	mov r7, inclr
+	ifu ds_snap
+	; DS widens five-bit vertex colours to nine bits as (c<<4)+15 (c>0) and
+	; keeps the top six; the native composite keeps the top six of eight.
+	mul r6.xyz, colc.xxxx, inclr.xyzz
+	add r6.xyz, consts.xxxx, r6.xyzz
+	flr r6.xyz, r6.xyzz
+	mul r7.xyz, colc.yyyy, r6.xyzz
+	add r7.xyz, colc.zzzz, r7.xyzz
+	slt r8.xyz, consts.yyyy, r6.xyzz
+	mul r7.xyz, r8.xyzz, r7.xyzz
+	mul r7.xyz, colc.wwww, r7.xyzz
+	min r7.xyz, consts.zzzz, r7.xyzz
+	.end
+	mov outclr, r7
+	mov outtc0, intex
+	end
+.end

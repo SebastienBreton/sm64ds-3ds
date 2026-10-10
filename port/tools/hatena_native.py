@@ -1,0 +1,11 @@
+#!/usr/bin/env python3
+"""Preserve ARM callback return registers; avoid missing-return UB in GCC."""
+from pathlib import Path
+import sys
+source=Path(sys.argv[1]).read_text()
+replacements=[('int daObjHatenaBlock_c::OnAttacked1(dActor_c &other)\n{\n    int v = mState;\n    if (v != STATE_BOUNCING) {\n        if (!func_ov102_02149078(this)) {\n            int val = other.param1;\n            mHitterParam = val;\n            func_ov102_02149da8(this, STATE_BOUNCING);\n        }\n    }\n}', 'int daObjHatenaBlock_c::OnAttacked1(dActor_c &other)\n{\n    if (mState == STATE_BOUNCING) return (int)(unsigned long)this;\n    int result = func_ov102_02149078(this);\n    if (result) return result;\n    mHitterParam = other.param1;\n    return sm64ds_hatena_change_state_result(this, STATE_BOUNCING);\n}'), ('int daObjHatenaBlock_c::OnHitFromUnderneath(dActor_c &other)\n{\n    if (mState != STATE_BOUNCING) {\n        mVertAccel = -0x8000;\n        mVertSpeed = 0x1e000;\n        if (!func_ov102_02149078(this)) {\n            mHitterParam = other.param1;\n            func_ov102_02149da8(this, STATE_BOUNCING);\n        }\n    }\n}', 'int daObjHatenaBlock_c::OnHitFromUnderneath(dActor_c &other)\n{\n    if (mState == STATE_BOUNCING) return (int)(unsigned long)this;\n    mVertAccel = -0x8000;\n    mVertSpeed = 0x1e000;\n    int result = func_ov102_02149078(this);\n    if (result) return result;\n    mHitterParam = other.param1;\n    return sm64ds_hatena_change_state_result(this, STATE_BOUNCING);\n}'), ('int daObjHatenaBlock_c::func_ov102_02149878()\n{\n    int r = DecIfAbove0_Short(&mBounceTimer);\n    if (r != 0) return r;\n    r = DistToCPlayer();\n    if (r <= 0x64000) return r;\n    func_ov102_02149da8(this, STATE_IDLE);\n}', 'int daObjHatenaBlock_c::func_ov102_02149878()\n{\n    int r = DecIfAbove0_Short(&mBounceTimer);\n    if (r != 0) return r;\n    r = DistToCPlayer();\n    if (r <= 0x64000) return r;\n    return sm64ds_hatena_change_state_result(this, STATE_IDLE);\n}')]
+for old,new in replacements:
+    assert source.count(old)==1, 'hatena callback changed; review ABI adapter'
+    source=source.replace(old,new)
+source='extern "C" int sm64ds_hatena_change_state_result(void*, int) asm("func_ov102_02149da8");\n'+source
+Path(sys.argv[2]).write_text(source)

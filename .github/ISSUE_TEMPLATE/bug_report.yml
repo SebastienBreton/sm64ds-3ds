@@ -1,0 +1,38 @@
+name: Bug report
+description: Something is broken or differs from the DS version
+labels: [bug]
+body:
+  - type: dropdown
+    id: hardware
+    attributes:
+      label: Where does it happen?
+      options:
+        - New 3DS / New 2DS XL
+        - Old 3DS / 2DS
+        - Azahar (emulator)
+        - Other emulator
+    validations:
+      required: true
+  - type: input
+    id: build
+    attributes:
+      label: Build / commit
+      placeholder: e.g. a1b2c3d or release name
+  - type: textarea
+    id: steps
+    attributes:
+      label: What did you do?
+      description: Steps to reproduce (level, star, character, what you pressed)
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect (what does the DS do)?
+    validations:
+      required: true
+  - type: textarea
+    id: log
+    attributes:
+      label: Log
+      description: Attach sdmc:/sm64ds/user-test.log, crash screens or photos

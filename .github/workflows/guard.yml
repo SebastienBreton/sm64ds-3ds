@@ -1,0 +1,32 @@
+name: guard
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  no-game-data:
+    runs-on: ubuntu-latest
+    steps:
+      # The sm64ds-decomp submodule is not checked out: it has its own repository
+      # and its own rules. These checks cover the files tracked by this repository.
+      - uses: actions/checkout@v4
+      - name: Refuse ROMs, saves, extracted data and big binaries
+        run: |
+          set -e
+          files=$(git ls-files -s | awk '$1 != "160000" {print $4}')
+          bad=$(printf '%s\n' "$files" | grep -Ei '\.(nds|sav|bin|bmp|3dsx|cia|elf|narc|sdat|bmd|btx|bca|nsbmd|nsbtx)$|(^|/)baserom|(^|/)extracted/|(^|/)build3ds/(validation|user-build|cmake)/' || true)
+          if [ -n "$bad" ]; then echo "::error::Game data or binaries must not be committed:"; echo "$bad"; exit 1; fi
+          big=$(printf '%s\n' "$files" | while read -r f; do [ -f "$f" ] && [ "$(wc -c < "$f")" -gt 2097152 ] && echo "$f"; done || true)
+          if [ -n "$big" ]; then echo "::error::Files larger than 2 MB (likely generated or ROM-derived):"; echo "$big"; exit 1; fi
+      - name: Submodule points at the fork
+        run: |
+          set -e
+          grep -q 'url = https://github.com/SebastienBreton/sm64ds-decomp.git' .gitmodules
+          git ls-files -s sm64ds-decomp | grep -q '^160000 '
+      - name: Python syntax
+        run: python3 -m compileall -q build3ds port/tools > /dev/null

@@ -1,0 +1,193 @@
+#include <cstdlib>
+// Bridges for TUs that declare C-NAMED symbols at C++ linkage (an extern
+// declaration outside the file's extern "C" block): the reference mangles
+// as ?_ZN...@@YA..., so a same-shape C++ definition here forwards to the
+// real implementation. The forward hop goes through a differently-named
+// extern "C" helper because one TU cannot name both linkages of the same
+// identifier.
+#include "dBgW.h"
+
+/* x86 __thiscall emulation: `this` in ecx via __fastcall, with a dummy edx
+   parameter (PORT_EDX). On ARM `this` is simply r0, so both vanish. */
+#ifndef PORT_EDX
+#ifdef _MSC_VER
+#define PORT_EDX , void *
+#else
+#define PORT_EDX
+#define __fastcall
+#define __thiscall
+#endif
+#endif
+
+
+int _ZN4dBgW9IsEnabledEv(void *self)
+{
+    return ((dBgW *)self)->dBgW::IsEnabled();
+}
+
+void _ZN4dBgW7DisableEv(void *self)
+{
+    ((dBgW *)self)->dBgW::Disable();
+}
+
+// The ov098 file table's second column is addressed through its own symbol
+// (base+4 on the DS -- an offset alias hosts cannot express). Column b gets
+// its own 0xc-stride view; the smoke seeds both views with the same
+// SharedFilePtr pointers.
+extern "C" {
+char data_ov098_0213c384[0x18];
+char data_ov098_0213c388[0x18];
+}
+
+// ---- gate-9 method bridges (C name -> MSVC method), the gx_upload pattern -
+#include "dBgActor_c.h"
+#include "ShadowModel.h"
+#include "Model.h"
+extern "C" {
+void _ZN10dBgActor_c19UpdateClsnPosAndRotEv(void *self)
+{ ((dBgActor_c *)self)->dBgActor_c::UpdateClsnPosAndRot(); }
+void _ZN10dBgActor_c21UpdateModelPosAndRotYEv(void *self)
+{ ((dBgActor_c *)self)->dBgActor_c::UpdateModelPosAndRotY(); }
+/* SHADOW SYSTEM DEFERRED (cosmetic): the cuboid template BMD at
+   data_020ad524 is BUILT AT RUNTIME by boot code not yet hosted (the ov000
+   static image holds path strings there). InitCuboid and the per-frame
+   drop-shadow install are no-ops until that boot path lands. */
+void _ZN8dActor_c18DropShadowScaleXYZER11ShadowModelR9Matrix4x35Fix12IiES5_S5_j(
+    void *, void *, void *, int, int, int, unsigned) {}
+void *_ZN5Model8LoadFileER13SharedFilePtr(void *fp)
+{ return Model::LoadFile(*(SharedFilePtr *)fp); }
+
+// BSS the shadow/collider systems use
+char data_020ad524[0x40];       /* ShadowModel's template BMD stub */
+void *data_020a0c80[24];        /* the collision actor registry (gate 8) */
+}
+
+#include "dBgW_Kc.h"
+#include "ModelBase.h"
+extern "C" {
+void *_ZN7dBgW_Kc8LoadFileER13SharedFilePtr(void *fp)
+{ return dBgW_Kc::LoadFile(*(SharedFilePtr *)fp); }
+void _ZN9ModelBase7SetFileEP8BMD_Fileii(void *self, void *bmd, int a, int b)
+{ ((ModelBase *)self)->ModelBase::SetFile((BMD_File *)bmd, a, b); }
+}
+#pragma comment(linker, "/alternatename:?data_ov098_0213c380@@3PADA=_data_ov098_0213c380")
+#pragma comment(linker, "/alternatename:?data_ov098_0213c384@@3PADA=_data_ov098_0213c384")
+
+extern "C" void _ZN7dBgW_Kc7SetFileEP8KCL_FileR10CLPS_Block(
+    void *self, void *kcl, void *clps)
+{
+    ((dBgW_Kc *)self)->dBgW_Kc::SetFile((KCL_File *)kcl,
+                                                  *(CLPS_Block *)clps);
+}
+
+// operator new support: the game heap pointer for actors (the smoke seeds
+// it with the root heap), and the zero-fill veneer -- its DS chain rides
+// arguments through registers, so the host supplies the semantics direct.
+extern "C" {
+void *data_020a0eac_c;
+}
+#pragma comment(linker, "/alternatename:?data_020a0eac@@3PAUHeap@@A=_data_020a0eac_c")
+#pragma comment(linker, "/alternatename:_data_020a0eac=_data_020a0eac_c")
+extern "C" void func_0206e2f8(void *p, int v, unsigned n)
+{
+    unsigned char *b = (unsigned char *)p;
+    for (unsigned i = 0; i < n; ++i) b[i] = (unsigned char)v;
+}
+extern "C" void hal_m43_roty(void *m, int a);
+void Matrix4x3_FromRotationY(void *m, int a) { hal_m43_roty(m, a); }
+
+#include "dBgW.h"
+extern "C" int _ZN4dBgW6EnableEP8dActor_c(void *self, void *actor)
+{
+    return ((dBgW *)self)->dBgW::Enable((dActor_c *)actor);
+}
+extern "C" {
+/* player-list globals ClosestPlayer scans: empty world -> null result */
+int data_0208e37c[2];
+int data_0208e380[2];
+int data_0209b450[2];
+int data_0209b458[2];
+int data_0209f21c[8];
+int data_0209f394[8];
+}
+
+extern "C" void _ZN6Memory10DeallocateEPv(void *p);
+extern "C" void Memory_Deallocate(void *p) { _ZN6Memory10DeallocateEPv(p); }
+extern "C" int hal_f0204424c(char *c);
+int func_0204424c(int c) { return hal_f0204424c((char *)c); }
+
+// Gate 9 dispatches native Model virtuals through this table. ModelBase.h
+// declares two destructor slots on GCC and explicitly reserves both on MSVC.
+// DoSetFile/UpdateVerts/Virtual10/Render therefore occupy slots 2/3/4/5.
+static int __fastcall mv_dosetfile(void *self PORT_EDX, char *f, int a, int b)
+{ return ((Model *)self)->Model::DoSetFile(f, a, b); }
+static void __fastcall mv_updateverts(void *self PORT_EDX)
+{ ((Model *)self)->Model::UpdateVerts(); }
+static void __fastcall mv_virtual10(void *self PORT_EDX, void *m)
+{ ((Model *)self)->Model::Virtual10(*(Matrix4x3 *)m); }
+static void __fastcall mv_render(void *self PORT_EDX, const void *s)
+{ ((Model *)self)->Model::Render((const Vector3 *)s); }
+extern "C" {
+extern void *_ZTV5Model[8];
+void hal_fill_model_vtable(void)
+{
+#if defined(_MSC_VER)
+    _ZTV5Model[2] = (void *)mv_dosetfile;
+    _ZTV5Model[3] = (void *)mv_updateverts;
+    _ZTV5Model[4] = (void *)mv_virtual10;
+    _ZTV5Model[5] = (void *)mv_render;
+#endif
+    // GCC emits the real vtable with two ABI header words. Its constructors
+    // install _ZTV5Model+2; overwriting raw table slots corrupts virtual calls.
+}
+}
+
+#include "ShadowModel.h"
+int ShadowModel::InitCuboid() { return 1; }
+#if defined(_MSC_VER)   /* GCC: the member above already is this symbol */
+extern "C" int _ZN11ShadowModel10InitCuboidEv(ShadowModel *self)
+{ return self->ShadowModel::InitCuboid(); }
+#endif
+extern "C" {
+void hal_fill_shadow_vtable(void) {}   /* shadow system deferred */
+}
+
+// Raw Itanium spellings retained by C and local-shadow callers after the real
+// definitions migrated to C++. Each wrapper uses an explicit qualified call so
+// a synthetic host vtable cannot recurse back into the shim.
+#include "dActor_c.h"
+#include "Heap.h"
+
+extern "C" {
+Player *_ZN8dActor_c13ClosestPlayerEv(dActor_c *self)
+{ return self->dActor_c::ClosestPlayer(); }
+void Heap_Destroy(void *heap);
+}
+void Heap::_Destroy() { Heap_Destroy(this); }
+
+// fBase_c's local static-class shadow and the migrated namespace function are
+// both cdecl with the same two pointer arguments; only their decorations differ.
+#pragma comment(linker, "/alternatename:?Deallocate@Memory@@SAXPAXPAUHeap@@@Z=?Deallocate@Memory@@YAXPAXPAVHeap@@@Z")
+
+extern "C" {
+void *_ZN5Model23AddToCommonModelDataArrER8BMD_File(void *file)
+{ return Model::AddToCommonModelDataArr(*(BMD_File *)file); }
+void *func_0203cc0c(unsigned size);
+void _ZN6Memory10DeallocateEPv(void *p);
+/* the DS global operator new/delete route through the Memory layer */
+/* The core-1 presentation/audio worker must never touch the game heap,
+   which has no locking. Its rare allocations come from libc instead; the
+   address-routed ::operator delete returns them there. */
+__attribute__((weak)) bool sm64ds_on_present_worker(void) { return false; }
+void *_Znwj(unsigned size)
+{
+    if (sm64ds_on_present_worker()) {
+        void *p = malloc(size ? size : 1);
+        if (p) return p;
+    }
+    return func_0203cc0c(size);
+}
+/* _ZN6Memory16operator_delete2EPv now lives in hal/ctor_bridge.cpp:
+   every target that builds a migrated model-family constructor needs
+   it, not just the ones that link this file. */
+}
