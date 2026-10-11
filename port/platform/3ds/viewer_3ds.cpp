@@ -436,7 +436,131 @@ void v3ds_init()
     gpu_init();
 }
 
-void v3ds_renderer_init() { g_auto=true; gpu_init(); C3D_CullFace(GPU_CULL_BACK_CCW); }
+// Hardware probe for the DS shadow-volume method (once at boot, log only):
+// an alpha mark (alpha-only colour mask, or full mask + keep-RGB blend) then a
+// destination-alpha blend, read back. Expected per half: marked = red*0.75,
+// unmarked = black. Tree shadows came out opaque black on the New 3DS.
+static void shadow_blend_probe(){
+    static const bool off=[](){const char* v=std::getenv("SM64DS_SHADOW_PROBE");return v&&v[0]=='0';}();
+    if(off)return;
+    C3D_RenderTarget* t=C3D_RenderTargetCreate(64,64,GPU_RB_RGBA8,GPU_RB_DEPTH24_STENCIL8);
+    auto* v=static_cast<V3dsVert*>(linearAlloc(12*sizeof(V3dsVert)));
+    auto* out=static_cast<u32*>(linearAlloc(64*64*4));
+    if(!t||!v||!out){std::printf("Shadow probe: allocation failed\n");if(t)C3D_RenderTargetDelete(t);if(v)linearFree(v);if(out)linearFree(out);return;}
+    auto quad=[&](V3dsVert* q,float x0,float x1){
+        const V3dsVert c[4]={{x0,-1,0,1,1,1,1,1,0,0},{x1,-1,0,1,1,1,1,1,0,0},{x1,1,0,1,1,1,1,1,0,0},{x0,1,0,1,1,1,1,1,0,0}};
+        const unsigned idx[]={0,1,2,0,2,3};for(unsigned i=0;i<6;++i)q[i]=c[idx[i]];
+    };
+    quad(v,-1.5f,0.f);quad(v+6,-1.5f,1.5f);
+    GSPGPU_FlushDataCache(v,12*sizeof(V3dsVert));
+    for(int mode=0;mode<2;++mode){
+        if(!C3D_FrameBegin(C3D_FRAME_SYNCDRAW))break;
+        C3D_RenderTargetClear(t,C3D_CLEAR_ALL,0x000000ffu,0);
+        C3D_FrameDrawOn(t);C3D_SetViewport(0,0,64,64);
+        shader_bind(false);C3D_SetAttrInfo(&g_attr);
+        C3D_FVUnifSet(GPU_VERTEX_SHADER,g_u_fix+0,1,0,0,0);C3D_FVUnifSet(GPU_VERTEX_SHADER,g_u_fix+1,0,1,0,0);
+        C3D_FVUnifSet(GPU_VERTEX_SHADER,g_u_fix+2,0,0,1,0);C3D_FVUnifSet(GPU_VERTEX_SHADER,g_u_fix+3,0,0,0,1);
+        C3D_FVUnifSet(GPU_VERTEX_SHADER,g_u_stereo,0,0,0,0);
+        auto* bi=C3D_GetBufInfo();BufInfo_Init(bi);BufInfo_Add(bi,v,sizeof(V3dsVert),3,0x210);
+        C3D_CullFace(GPU_CULL_NONE);C3D_StencilTest(false,GPU_ALWAYS,0,0xff,0xff);C3D_AlphaTest(false,GPU_ALWAYS,0);
+        for(unsigned st=0;st<6;++st)C3D_TexEnvInit(C3D_GetTexEnv(st));
+        auto* env=C3D_GetTexEnv(0);
+        C3D_TexEnvSrc(env,C3D_Both,GPU_CONSTANT,GPU_CONSTANT,GPU_CONSTANT);C3D_TexEnvFunc(env,C3D_Both,GPU_REPLACE);
+        C3D_TexEnvColor(env,0x40000000u);
+        if(mode==0){C3D_DepthTest(false,GPU_ALWAYS,GPU_WRITE_ALPHA);C3D_AlphaBlend(GPU_BLEND_ADD,GPU_BLEND_ADD,GPU_ONE,GPU_ZERO,GPU_ONE,GPU_ZERO);}
+        else{C3D_DepthTest(false,GPU_ALWAYS,GPU_WRITE_COLOR);C3D_AlphaBlend(GPU_BLEND_ADD,GPU_BLEND_ADD,GPU_ZERO,GPU_ONE,GPU_ONE,GPU_ZERO);}
+        C3D_DrawArrays(GPU_TRIANGLES,0,6);
+        env=C3D_GetTexEnv(0);C3D_TexEnvInit(env);
+        C3D_TexEnvSrc(env,C3D_Both,GPU_CONSTANT,GPU_CONSTANT,GPU_CONSTANT);C3D_TexEnvFunc(env,C3D_Both,GPU_REPLACE);
+        C3D_TexEnvColor(env,0xff0000ffu);
+        C3D_DepthTest(false,GPU_ALWAYS,static_cast<GPU_WRITEMASK>(GPU_WRITE_RED|GPU_WRITE_GREEN|GPU_WRITE_BLUE));
+        C3D_AlphaBlend(GPU_BLEND_ADD,GPU_BLEND_ADD,GPU_ONE_MINUS_DST_ALPHA,GPU_DST_ALPHA,GPU_ZERO,GPU_ONE);
+        C3D_DrawArrays(GPU_TRIANGLES,6,6);
+        C3D_FrameEnd(0);
+        const u32 flags=GX_TRANSFER_FLIP_VERT(0)|GX_TRANSFER_OUT_TILED(0)|GX_TRANSFER_RAW_COPY(0)|
+            GX_TRANSFER_IN_FORMAT(GX_TRANSFER_FMT_RGBA8)|GX_TRANSFER_OUT_FORMAT(GX_TRANSFER_FMT_RGBA8)|GX_TRANSFER_SCALING(GX_TRANSFER_SCALE_NO);
+        C3D_SyncDisplayTransfer(static_cast<u32*>(t->frameBuf.colorBuf),GX_BUFFER_DIM(64,64),out,GX_BUFFER_DIM(64,64),flags);
+        GSPGPU_InvalidateDataCache(out,64*64*4);
+        std::printf("Shadow probe mode=%s pixels %08lx %08lx %08lx %08lx (expect one half red*0.75 alpha40, other black alphaff)\n",
+            mode?"blend-mark":"alpha-mask",(unsigned long)out[8*64+8],(unsigned long)out[8*64+56],(unsigned long)out[56*64+8],(unsigned long)out[56*64+56]);
+    }
+    // Stencil probe (same D24S8 target): mark the left half with stencil
+    // REPLACE 0x85, then draw red over the whole target with a stencil test.
+    // s0 EQUAL 0x85 (expect red left only), s1 NOTEQUAL 0xc5 on ID bits 0x3f
+    // (DS "not on own polygon ID": expect red right only); depth test ALWAYS
+    // enabled (s0,s1) or disabled (s2 = s0 without the depth test).
+    for(int mode=0;mode<3;++mode){
+        if(!C3D_FrameBegin(C3D_FRAME_SYNCDRAW))break;
+        C3D_RenderTargetClear(t,C3D_CLEAR_ALL,0x000000ffu,0);
+        C3D_FrameDrawOn(t);C3D_SetViewport(0,0,64,64);
+        shader_bind(false);C3D_SetAttrInfo(&g_attr);
+        C3D_FVUnifSet(GPU_VERTEX_SHADER,g_u_fix+0,1,0,0,0);C3D_FVUnifSet(GPU_VERTEX_SHADER,g_u_fix+1,0,1,0,0);
+        C3D_FVUnifSet(GPU_VERTEX_SHADER,g_u_fix+2,0,0,1,0);C3D_FVUnifSet(GPU_VERTEX_SHADER,g_u_fix+3,0,0,0,1);
+        C3D_FVUnifSet(GPU_VERTEX_SHADER,g_u_stereo,0,0,0,0);
+        auto* bi=C3D_GetBufInfo();BufInfo_Init(bi);BufInfo_Add(bi,v,sizeof(V3dsVert),3,0x210);
+        C3D_CullFace(GPU_CULL_NONE);C3D_AlphaTest(false,GPU_ALWAYS,0);
+        C3D_AlphaBlend(GPU_BLEND_ADD,GPU_BLEND_ADD,GPU_ONE,GPU_ZERO,GPU_ONE,GPU_ZERO);
+        for(unsigned st=0;st<6;++st)C3D_TexEnvInit(C3D_GetTexEnv(st));
+        auto* env=C3D_GetTexEnv(0);
+        C3D_TexEnvSrc(env,C3D_Both,GPU_CONSTANT,GPU_CONSTANT,GPU_CONSTANT);C3D_TexEnvFunc(env,C3D_Both,GPU_REPLACE);
+        C3D_TexEnvColor(env,0xff00ff00u); // green
+        const bool depth=mode!=2;
+        C3D_StencilOp(GPU_STENCIL_KEEP,GPU_STENCIL_KEEP,GPU_STENCIL_REPLACE);
+        C3D_StencilTest(true,GPU_ALWAYS,0x85,0xff,0xff);
+        C3D_DepthTest(depth,GPU_ALWAYS,GPU_WRITE_ALL);
+        C3D_DrawArrays(GPU_TRIANGLES,0,6);
+        env=C3D_GetTexEnv(0);C3D_TexEnvInit(env);
+        C3D_TexEnvSrc(env,C3D_Both,GPU_CONSTANT,GPU_CONSTANT,GPU_CONSTANT);C3D_TexEnvFunc(env,C3D_Both,GPU_REPLACE);
+        C3D_TexEnvColor(env,0xff0000ffu); // red
+        C3D_StencilOp(GPU_STENCIL_KEEP,GPU_STENCIL_KEEP,GPU_STENCIL_KEEP);
+        if(mode==1)C3D_StencilTest(true,GPU_NOTEQUAL,0xc5,0x3f,0x00);
+        else C3D_StencilTest(true,GPU_EQUAL,0x85,0xff,0x00);
+        C3D_DepthTest(depth,GPU_ALWAYS,depth?GPU_WRITE_ALL:GPU_WRITE_COLOR);
+        C3D_DrawArrays(GPU_TRIANGLES,6,6);
+        C3D_StencilTest(false,GPU_ALWAYS,0,0xff,0xff);
+        C3D_FrameEnd(0);
+        const u32 flags=GX_TRANSFER_FLIP_VERT(0)|GX_TRANSFER_OUT_TILED(0)|GX_TRANSFER_RAW_COPY(0)|
+            GX_TRANSFER_IN_FORMAT(GX_TRANSFER_FMT_RGBA8)|GX_TRANSFER_OUT_FORMAT(GX_TRANSFER_FMT_RGBA8)|GX_TRANSFER_SCALING(GX_TRANSFER_SCALE_NO);
+        C3D_SyncDisplayTransfer(static_cast<u32*>(t->frameBuf.colorBuf),GX_BUFFER_DIM(64,64),out,GX_BUFFER_DIM(64,64),flags);
+        GSPGPU_InvalidateDataCache(out,64*64*4);
+        static const char* const names[3]={"s0-equal","s1-notequal-id","s2-equal-nodepth"};
+        static const char* const expect[3]={"marked half red, other black","marked half green, other red","marked half red, other black"};
+        std::printf("Stencil probe mode=%s pixels %08lx %08lx %08lx %08lx (expect %s)\n",names[mode],
+            (unsigned long)out[8*64+8],(unsigned long)out[8*64+56],(unsigned long)out[56*64+8],(unsigned long)out[56*64+56],expect[mode]);
+    }
+    // Mask-pass probe: red background, then the DS mask state writes alpha 0x40
+    // on the left half; the RGB must stay red (expect left ff000040, right ff0000ff).
+    // m0 alpha-only mask, no depth test; m1 + depth test ALWAYS; m2 + depth LEQUAL
+    // (depth cleared to far 0, fragment nearer is NOT LEQUAL -> use cleared 0xffffff);
+    // m3 colour mask + keep-RGB blend, depth LEQUAL.
+    for(int mode=0;mode<4;++mode){
+        if(!C3D_FrameBegin(C3D_FRAME_SYNCDRAW))break;
+        C3D_RenderTargetClear(t,C3D_CLEAR_ALL,0xff0000ffu,0x00ffffffu);
+        C3D_FrameDrawOn(t);C3D_SetViewport(0,0,64,64);
+        shader_bind(false);C3D_SetAttrInfo(&g_attr);
+        C3D_FVUnifSet(GPU_VERTEX_SHADER,g_u_fix+0,1,0,0,0);C3D_FVUnifSet(GPU_VERTEX_SHADER,g_u_fix+1,0,1,0,0);
+        C3D_FVUnifSet(GPU_VERTEX_SHADER,g_u_fix+2,0,0,1,0);C3D_FVUnifSet(GPU_VERTEX_SHADER,g_u_fix+3,0,0,0,1);
+        C3D_FVUnifSet(GPU_VERTEX_SHADER,g_u_stereo,0,0,0,0);
+        auto* bi=C3D_GetBufInfo();BufInfo_Init(bi);BufInfo_Add(bi,v,sizeof(V3dsVert),3,0x210);
+        C3D_CullFace(GPU_CULL_NONE);C3D_AlphaTest(false,GPU_ALWAYS,0);C3D_StencilTest(false,GPU_ALWAYS,0,0xff,0xff);
+        for(unsigned st=0;st<6;++st)C3D_TexEnvInit(C3D_GetTexEnv(st));
+        auto* env=C3D_GetTexEnv(0);
+        C3D_TexEnvSrc(env,C3D_Both,GPU_CONSTANT,GPU_CONSTANT,GPU_CONSTANT);C3D_TexEnvFunc(env,C3D_Both,GPU_REPLACE);
+        C3D_TexEnvColor(env,0x40000000u);
+        if(mode==3){C3D_DepthTest(true,GPU_LEQUAL,GPU_WRITE_COLOR);C3D_AlphaBlend(GPU_BLEND_ADD,GPU_BLEND_ADD,GPU_ZERO,GPU_ONE,GPU_ONE,GPU_ZERO);}
+        else{C3D_DepthTest(mode!=0,mode==2?GPU_LEQUAL:GPU_ALWAYS,GPU_WRITE_ALPHA);C3D_AlphaBlend(GPU_BLEND_ADD,GPU_BLEND_ADD,GPU_ONE,GPU_ZERO,GPU_ONE,GPU_ZERO);}
+        C3D_DrawArrays(GPU_TRIANGLES,0,6);
+        C3D_FrameEnd(0);
+        const u32 flags=GX_TRANSFER_FLIP_VERT(0)|GX_TRANSFER_OUT_TILED(0)|GX_TRANSFER_RAW_COPY(0)|
+            GX_TRANSFER_IN_FORMAT(GX_TRANSFER_FMT_RGBA8)|GX_TRANSFER_OUT_FORMAT(GX_TRANSFER_FMT_RGBA8)|GX_TRANSFER_SCALING(GX_TRANSFER_SCALE_NO);
+        C3D_SyncDisplayTransfer(static_cast<u32*>(t->frameBuf.colorBuf),GX_BUFFER_DIM(64,64),out,GX_BUFFER_DIM(64,64),flags);
+        GSPGPU_InvalidateDataCache(out,64*64*4);
+        std::printf("Mask probe m%d pixels %08lx %08lx %08lx %08lx (expect marked ff000040, other ff0000ff)\n",mode,
+            (unsigned long)out[8*64+8],(unsigned long)out[8*64+56],(unsigned long)out[56*64+8],(unsigned long)out[56*64+56]);
+    }
+    C3D_RenderTargetDelete(t);linearFree(v);linearFree(out);
+}
+void v3ds_renderer_init() { g_auto=true; gpu_init(); C3D_CullFace(GPU_CULL_BACK_CCW); shadow_blend_probe(); C3D_CullFace(GPU_CULL_BACK_CCW); }
 
 void v3ds_exit()
 {
@@ -1704,6 +1828,15 @@ static uint32_t g_fog_constant=0;
 // Hardware experiment (SM64DS_HW_STENCIL_DEPTHWRITE=1): passes that write the
 // stencil (translucent once-per-ID marks, DS shadow volumes) also enable depth
 // writes, in case the real PICA only updates the stencil with depth writes on.
+// Hardware experiment (SM64DS_SHADOW_MASK_BLEND=1): DS shadow alpha marks are
+// written with all colour channels enabled and a blend that keeps the RGB
+// (ZERO/ONE) and replaces the alpha (ONE/ZERO), instead of an alpha-only
+// colour write mask (tree shadows opaque black on the New 3DS).
+static void shadow_alpha_write(bool test,GPU_TESTFUNC function){
+    static const bool blend=[](){const char* v=std::getenv("SM64DS_SHADOW_MASK_BLEND");return v&&v[0]=='1';}();
+    if(blend){C3D_DepthTest(test,function,GPU_WRITE_COLOR);C3D_AlphaBlend(GPU_BLEND_ADD,GPU_BLEND_ADD,GPU_ZERO,GPU_ONE,GPU_ONE,GPU_ZERO);}
+    else{C3D_DepthTest(test,function,GPU_WRITE_ALPHA);C3D_AlphaBlend(GPU_BLEND_ADD,GPU_BLEND_ADD,GPU_ONE,GPU_ZERO,GPU_ONE,GPU_ZERO);}
+}
 static GPU_WRITEMASK stencil_pass_mask(unsigned mask){
     static const bool force=[](){const char* v=std::getenv("SM64DS_HW_STENCIL_DEPTHWRITE");return v&&v[0]=='1';}();
     return static_cast<GPU_WRITEMASK>(force?(mask|GPU_WRITE_DEPTH):mask);
@@ -1765,10 +1898,40 @@ static void fog_stage(unsigned polygon_attr){
 // blending applies the shadow colour only on marked pixels). Levels clear with
 // alpha 31, so every 3D pixel is opaque and alpha is restored to 255 afterwards.
 static bool g_shadow_marks=false;
+// DS shadow volumes (mask ID 0 marks the framebuffer alpha, shadow ID>0
+// blends by it). On the New 3DS the marks never take (shadows opaque black,
+// objects inside the volume darkened; diag t1/t2 2026-10-10) while Azahar is
+// exact, so the default is: exact on Azahar (regression comparisons), simple
+// translucent shadows on hardware. SM64DS_DS_SHADOWS=1/0 forces the mode.
+// Real-target shadow probe (hwfix12): every 600th native frame is drawn with
+// the exact DS shadows and without the final alpha restore; before the next
+// FrameBegin (command_drain.cpp) the 3D target is read back (display transfer
+// to linear) and an alpha/colour histogram is logged ("Shadow target probe").
+static int g_shadow_probe_state=0; // 1 drawing the probe frame, 2 readback pending
+static C3D_RenderTarget* g_shadow_probe_target=nullptr;
+static unsigned g_shadow_probe_count=0;
+extern "C" { volatile int sm64ds_shadow_probe_pending=0; }
 static bool ds_shadows_enabled(){
-    static const bool option=[](){const char* s=std::getenv("SM64DS_DS_SHADOWS");return !(s&&std::strcmp(s,"0")==0);}();
+    if(g_shadow_probe_state==1)return g_native_clear.alpha()==31;
+    static const bool option=[](){
+        // hwfix15: SM64DS_DS_SHADOWS=0 simple translucent, =alpha the former
+        // alpha-mark volumes, default the stencil volumes (ds_shadow_stencil()).
+        const char* s=std::getenv("SM64DS_DS_SHADOWS");
+        const bool exact=!(s && std::strcmp(s,"0")==0);
+        std::printf("DS shadows: %s\n",!exact?"simple translucent":(s&&!std::strcmp(s,"alpha"))?"alpha-mark volumes":"stencil volumes");
+        return exact;
+    }();
     return option && g_native_clear.alpha()==31;
 }
+// Stencil DS shadow volumes (hwfix15, default): the alpha-mark method never
+// worked in the real frame on the New 3DS. Stencil bit 6 is the DS shadow
+// stencil for the duration of a mask/shadow sequence (cleared at its start);
+// bits 0-5 keep the polygon IDs, bit 7 the occupied/fog flag.
+static bool ds_shadow_stencil(){
+    static const bool value=[](){const char* s=std::getenv("SM64DS_DS_SHADOWS");return !(s&&!std::strcmp(s,"alpha"));}();
+    return value;
+}
+static unsigned g_shadow_mask_alpha=255; // pa8 of the sequence's last mask polygon
 static bool ensure_shadow_clear_quad(){
     if(g_shadow_clear)return true;
     g_shadow_clear=static_cast<V3dsVert*>(linearAlloc(6*sizeof(V3dsVert)));
@@ -1819,6 +1982,13 @@ template<class F> static void each_eye(F&& draw){
 }
 static void draw_batches(const V3dsVert *verts, int nverts, const V3dsBatch *b, int nb, V3dsVert *vbo, bool native, const ds_shadow::FramePlan* shadow_plan=nullptr)
 {
+    // Geometry passes only configure TexEnv stages 0 (material) and 1 (fog).
+    // Stages 2..5 keep whatever the previous frame's composite / OBJ merge /
+    // sky-bar passes left (lerps, modulates): on the New 3DS that leftover
+    // changed the DS shadow-mask alpha (intermediate alphas, black shadows,
+    // hwfix12/13 probes) while Azahar happened to see passthrough stages.
+    for(unsigned stage=2;stage<6;++stage)C3D_TexEnvInit(C3D_GetTexEnv(stage));
+
     UnifiedDrawScope unified_scope;
     ds_shadow::Sequence shadow_sequence;
     C3D_BufInfo *bi = C3D_GetBufInfo();
@@ -1926,6 +2096,22 @@ static void draw_batches(const V3dsVert *verts, int nverts, const V3dsBatch *b, 
                     C3D_CullFace(faces==0xc0?GPU_CULL_NONE:back_ccw?GPU_CULL_BACK_CCW:GPU_CULL_FRONT_CCW);
                 }else draw();
             });
+        } else if(native && ((b[i].polygon_attr>>4)&3)==3 && !ds_shadows_enabled()) {
+            // Simple shadows (hardware default): the mask volume (ID 0) is not
+            // drawn (it showed as an extra arc at Yoshi's feet); a shadow
+            // polygon blends by its own alpha, once per ID, never over pixels
+            // of its own polygon ID (DS rule: an object is not darkened by its
+            // own shadow). The DS mask is not reproduced: other objects inside
+            // the volume are darkened too.
+            if(!((b[i].polygon_attr>>24)&63))continue;
+            shadow_sequence.previous_mask=false;
+            const unsigned id=(b[i].polygon_attr>>24)&63;
+            C3D_StencilOp(GPU_STENCIL_KEEP,GPU_STENCIL_KEEP,GPU_STENCIL_REPLACE);
+            C3D_StencilTest(true,GPU_NOTEQUAL,0xc0|id,0x3f,0x7f);
+            C3D_AlphaTest(true,GPU_GREATER,0);
+            C3D_DepthTest(true,GPU_GREATER,static_cast<GPU_WRITEMASK>(GPU_WRITE_RED|GPU_WRITE_GREEN|GPU_WRITE_BLUE|(write_translucent_depth?GPU_WRITE_DEPTH:0)));
+            C3D_AlphaBlend(GPU_BLEND_ADD,GPU_BLEND_ADD,GPU_SRC_ALPHA,GPU_ONE_MINUS_SRC_ALPHA,GPU_ZERO,GPU_ONE);
+            draw();
         } else if(native && ((b[i].polygon_attr>>4)&3)==3 && ds_shadows_enabled()) {
             const unsigned id=(b[i].polygon_attr>>24)&63;
             auto fullscreen_alpha=[&](unsigned alpha){
@@ -1934,8 +2120,7 @@ static void draw_batches(const V3dsVert *verts, int nverts, const V3dsBatch *b, 
                 C3D_TexEnvSrc(reset,C3D_Both,GPU_CONSTANT,GPU_CONSTANT,GPU_CONSTANT);C3D_TexEnvFunc(reset,C3D_Both,GPU_REPLACE);
                 C3D_TexEnvColor(reset,alpha<<24);fog_stage(0);
                 C3D_StencilTest(false,GPU_ALWAYS,0,0xff,0xff);C3D_AlphaTest(false,GPU_ALWAYS,0);
-                C3D_DepthTest(false,GPU_ALWAYS,GPU_WRITE_ALPHA);
-                C3D_AlphaBlend(GPU_BLEND_ADD,GPU_BLEND_ADD,GPU_ONE,GPU_ZERO,GPU_ONE,GPU_ZERO);
+                shadow_alpha_write(false,GPU_ALWAYS);
                 C3D_CullFace(GPU_CULL_NONE);
                 shader_bind(false);C3D_SetAttrInfo(&g_attr);
                 bi=C3D_GetBufInfo();BufInfo_Init(bi);BufInfo_Add(bi,g_shadow_clear,sizeof(V3dsVert),3,0x210);
@@ -1944,7 +2129,48 @@ static void draw_batches(const V3dsVert *verts, int nverts, const V3dsBatch *b, 
                 if(mesh_active){mesh_bind_batch(i);mesh_buffers();}
                 C3D_CullFace(faces==0xc0?GPU_CULL_NONE:back_ccw?GPU_CULL_BACK_CCW:GPU_CULL_FRONT_CCW);
             };
-            if(id==0){
+            if(ds_shadow_stencil()){
+                if(id==0){
+                    if(!shadow_sequence.previous_mask && ensure_shadow_clear_quad()){
+                        // Sequence start: clear the shadow stencil bit everywhere.
+                        C3D_StencilTest(true,GPU_ALWAYS,0x00,0xff,0x40);
+                        C3D_StencilOp(GPU_STENCIL_REPLACE,GPU_STENCIL_REPLACE,GPU_STENCIL_REPLACE);
+                        C3D_AlphaTest(false,GPU_ALWAYS,0);C3D_DepthTest(false,GPU_ALWAYS,static_cast<GPU_WRITEMASK>(0));
+                        C3D_CullFace(GPU_CULL_NONE);shader_bind(false);C3D_SetAttrInfo(&g_attr);
+                        bi=C3D_GetBufInfo();BufInfo_Init(bi);BufInfo_Add(bi,g_shadow_clear,sizeof(V3dsVert),3,0x210);
+                        each_eye([&](){C3D_DrawArrays(GPU_TRIANGLES,0,6);});
+                        bi=C3D_GetBufInfo();BufInfo_Init(bi);BufInfo_Add(bi,vbo,sizeof(V3dsVert),3,0x210);
+                        if(mesh_active){mesh_bind_batch(i);mesh_buffers();}
+                        C3D_CullFace(faces==0xc0?GPU_CULL_NONE:back_ccw?GPU_CULL_BACK_CCW:GPU_CULL_FRONT_CCW);
+                    }
+                    shadow_sequence.previous_mask=true;
+                    g_shadow_mask_alpha=pa==31?255u:((pa+1)*255+16)/32;
+                    // Mark (bit 6) where the mask FAILS the depth test (behind or equal).
+                    C3D_StencilTest(true,GPU_ALWAYS,0x40,0xff,0x40);
+                    C3D_StencilOp(GPU_STENCIL_KEEP,GPU_STENCIL_REPLACE,GPU_STENCIL_KEEP);
+                    C3D_AlphaTest(false,GPU_ALWAYS,0);
+                    C3D_DepthTest(true,GPU_GREATER,static_cast<GPU_WRITEMASK>(0));
+                    draw();
+                }else{
+                    shadow_sequence.previous_mask=false;
+                    // Not over pixels of its own polygon ID (and once per ID): drop
+                    // the mark there first, whatever the depth.
+                    C3D_StencilTest(true,GPU_EQUAL,id,0x3f,0x40);
+                    C3D_StencilOp(GPU_STENCIL_KEEP,GPU_STENCIL_ZERO,GPU_STENCIL_ZERO);
+                    C3D_AlphaTest(false,GPU_ALWAYS,0);
+                    C3D_DepthTest(true,GPU_ALWAYS,static_cast<GPU_WRITEMASK>(0));
+                    draw();
+                    // Shadow: marked pixels, passing the depth test; the pixel takes
+                    // the shadow's ID. Weight = the mask alpha (as the DS mask/shadow pair).
+                    C3D_StencilTest(true,GPU_EQUAL,0x40|id,0x40,0x3f);
+                    C3D_StencilOp(GPU_STENCIL_KEEP,GPU_STENCIL_KEEP,GPU_STENCIL_REPLACE);
+                    C3D_AlphaTest(true,GPU_GREATER,0);
+                    C3D_DepthTest(true,GPU_GREATER,static_cast<GPU_WRITEMASK>(GPU_WRITE_RED|GPU_WRITE_GREEN|GPU_WRITE_BLUE|(write_translucent_depth?GPU_WRITE_DEPTH:0)));
+                    C3D_BlendingColor(g_shadow_mask_alpha<<24);
+                    C3D_AlphaBlend(GPU_BLEND_ADD,GPU_BLEND_ADD,GPU_CONSTANT_ALPHA,GPU_ONE_MINUS_CONSTANT_ALPHA,GPU_ZERO,GPU_ONE);
+                    draw();
+                }
+            }else if(id==0){
                 if(!shadow_sequence.previous_mask){fullscreen_alpha(255);g_shadow_marks=true;}
                 shadow_sequence.previous_mask=true;
                 // Mark where the mask FAILS the DS depth test (behind or equal).
@@ -1953,8 +2179,7 @@ static void draw_batches(const V3dsVert *verts, int nverts, const V3dsBatch *b, 
                 const unsigned pa8=pa==31?255u:((pa+1)*255+16)/32;
                 C3D_TexEnvColor(mark,(255u-pa8)<<24);fog_stage(0);
                 C3D_StencilTest(false,GPU_ALWAYS,0,0xff,0xff);C3D_AlphaTest(false,GPU_ALWAYS,0);
-                C3D_DepthTest(true,GPU_LEQUAL,GPU_WRITE_ALPHA);
-                C3D_AlphaBlend(GPU_BLEND_ADD,GPU_BLEND_ADD,GPU_ONE,GPU_ZERO,GPU_ONE,GPU_ZERO);
+                shadow_alpha_write(true,GPU_LEQUAL);
                 draw();
             }else{
                 shadow_sequence.previous_mask=false;
@@ -2048,14 +2273,13 @@ static void draw_batches(const V3dsVert *verts, int nverts, const V3dsBatch *b, 
         }
     }
     fog_stage(0);
-    if(g_shadow_marks && native && ensure_shadow_clear_quad()){
+    if(g_shadow_marks && native && g_shadow_probe_state!=1 && ensure_shadow_clear_quad()){
         // Restore the opaque 3D layer alpha consumed by the shadow marks.
         C3D_TexEnv* reset=C3D_GetTexEnv(0);C3D_TexEnvInit(reset);
         C3D_TexEnvSrc(reset,C3D_Both,GPU_CONSTANT,GPU_CONSTANT,GPU_CONSTANT);C3D_TexEnvFunc(reset,C3D_Both,GPU_REPLACE);
         C3D_TexEnvColor(reset,0xff000000u);
         C3D_StencilTest(false,GPU_ALWAYS,0,0xff,0xff);C3D_AlphaTest(false,GPU_ALWAYS,0);
-        C3D_DepthTest(false,GPU_ALWAYS,GPU_WRITE_ALPHA);
-        C3D_AlphaBlend(GPU_BLEND_ADD,GPU_BLEND_ADD,GPU_ONE,GPU_ZERO,GPU_ONE,GPU_ZERO);
+        shadow_alpha_write(false,GPU_ALWAYS);
         C3D_CullFace(GPU_CULL_NONE);
         shader_bind(false);C3D_SetAttrInfo(&g_attr);
         bi=C3D_GetBufInfo();BufInfo_Init(bi);BufInfo_Add(bi,g_shadow_clear,sizeof(V3dsVert),3,0x210);
@@ -2269,6 +2493,9 @@ static bool gpu_frame(const V3dsVert *verts, int nverts, const V3dsBatch *batche
         clear_fog_flags?((g_native_clear.color&0x8000u)?0x80u:0u)|g_native_clear.polygon_id():
         (g_native_clear.alpha()?(0x80|g_native_clear.polygon_id()):0)):0;
     const uint32_t clear_depth=native?(g_native_clear.reversed_depth()|(clear_stencil<<24)):0;
+    {   static unsigned frames=0;static const bool probe=[](){const char* v=std::getenv("SM64DS_SHADOW_TARGET_PROBE");return !(v&&v[0]=='0');}();
+        if(probe && native && g_shadow_probe_state==0 && g_shadow_probe_count<12 && ++frames%600==0){g_shadow_probe_state=1;g_shadow_probe_target=left;}
+    }
     C3D_RenderTargetClear(left, C3D_CLEAR_ALL, clear_color, clear_depth);
     C3D_FrameDrawOn(left);
 #ifdef SM64DS_GPU_COMPOSITE_CANDIDATE
@@ -2301,6 +2528,7 @@ static bool gpu_frame(const V3dsVert *verts, int nverts, const V3dsBatch *batche
     }
     const double draw_started=v3ds_time_ms();
     draw_batches(verts, nverts, batches, nb, vbo, native, shadow_plan);
+    if(g_shadow_probe_state==1){g_shadow_probe_state=2;sm64ds_shadow_probe_pending=1;}
     g_last_draw_ms=v3ds_time_ms()-draw_started;
     if(g_eye.on){g_eye.on=false;C3D_SetScissor(GPU_SCISSOR_DISABLE,0,0,0,0);}
     if (slider > 0.0f && !stacked) {
@@ -3091,4 +3319,26 @@ extern "C" void native_mesh_print_stats(){
  (unsigned long long)mesh_stats.frames,(unsigned long long)mesh_stats.builds,(unsigned long long)mesh_stats.reuses,(unsigned long long)mesh_stats.static_hits,(unsigned long long)mesh_stats.static_misses,
  (unsigned long long)mesh_stats.position_bytes,(unsigned long long)mesh_stats.index_bytes,(unsigned long long)mesh_stats.dynamic_bytes,(unsigned long long)mesh_stats.uniform_vectors,(unsigned long long)mesh_stats.draws,(unsigned long long)mesh_stats.runs,
  (unsigned long long)mesh_stats.vertices,(unsigned long long)mesh_stats.triangles,(unsigned long long)mesh_stats.matrices,mesh_stats.drain_ms,mesh_stats.prepare_ms,mesh_stats.upload_ms);
+}
+
+// Called outside any frame (command_drain.cpp FrameBegin wrapper) after a probe frame.
+extern "C" void sm64ds_shadow_probe_readback(){
+    sm64ds_shadow_probe_pending=0;
+    C3D_RenderTarget* t=g_shadow_probe_target;g_shadow_probe_state=0;
+    if(!t)return;
+    const unsigned w=t->frameBuf.width,h=t->frameBuf.height;
+    auto* out=static_cast<u32*>(linearAlloc(size_t(w)*h*4));
+    if(!out){std::printf("Shadow target probe: no linear memory\n");return;}
+    const u32 flags=GX_TRANSFER_FLIP_VERT(0)|GX_TRANSFER_OUT_TILED(0)|GX_TRANSFER_RAW_COPY(0)|
+        GX_TRANSFER_IN_FORMAT(GX_TRANSFER_FMT_RGBA8)|GX_TRANSFER_OUT_FORMAT(GX_TRANSFER_FMT_RGBA8)|GX_TRANSFER_SCALING(GX_TRANSFER_SCALE_NO);
+    C3D_SyncDisplayTransfer(static_cast<u32*>(t->frameBuf.colorBuf),GX_BUFFER_DIM(w,h),out,GX_BUFFER_DIM(w,h),flags);
+    GSPGPU_InvalidateDataCache(out,size_t(w)*h*4);
+    unsigned a0=0,alow=0,a7f=0,amid=0,aff=0,black=0;
+    for(unsigned i=0;i<w*h;++i){const u32 p=out[i];const unsigned a=p&255;
+        if(a==0)++a0;else if(a<0x70)++alow;else if(a<=0x8f)++a7f;else if(a<255)++amid;else ++aff;
+        if(((p>>24)&255)<16 && ((p>>16)&255)<16 && ((p>>8)&255)<16)++black;}
+    ++g_shadow_probe_count;
+    std::printf("Shadow target probe #%u %ux%u alpha: 0=%u 1-6f=%u 70-8f=%u 90-fe=%u ff=%u black=%u\n",
+        g_shadow_probe_count,w,h,a0,alow,a7f,amid,aff,black);
+    linearFree(out);
 }

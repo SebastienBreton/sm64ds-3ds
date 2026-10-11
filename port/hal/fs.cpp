@@ -310,8 +310,10 @@ static void prefetch_run(PrefetchPass &pass)
 #ifdef __3DS__
     // One line per pass in the user log: the real SD cost on hardware
     // (time = SD time of this pass only; resident = whole table).
-    printf("fs prefetch: %s %u files %u bytes in %.1f ms (resident %u files)\n", pass.name, pass.files, pass.bytes,
-           double(pass.ticks) / 268111.856, unsigned(g_prefetch_count));
+    // Integer formatting only: this runs on the small prefetch-thread stack
+    // (newlib's floating-point printf path is the deepest one).
+    printf("fs prefetch: %s %u files %u bytes in %u ms (resident %u files)\n", pass.name, pass.files, pass.bytes,
+           unsigned(pass.ticks / 268111ull), unsigned(g_prefetch_count));
 #endif
 }
 static void prefetch_thread(void *)
@@ -362,7 +364,10 @@ static void prefetch_start_once(void)
     // for the same 80%.
     unsigned limit = 0;
     if (APT_GetAppCpuTimeLimit(&limit) >= 0 && limit == 0) APT_SetAppCpuTimeLimit(80);
-    g_prefetch_thread = threadCreate(prefetch_thread, nullptr, 16 * 1024, 0x3f, 1, false);
+    // 64 KiB: the thread runs newlib fopen/fread/printf and libctru FS IPC;
+    // 16 KiB left no margin (hardware freezes right after its log lines; a
+    // stack overflow would silently overwrite the neighbouring heap block).
+    g_prefetch_thread = threadCreate(prefetch_thread, nullptr, 64 * 1024, 0x3f, 1, false);
     if (!g_prefetch_thread) fprintf(stderr, "fs: prefetch thread unavailable\n");
     else atexit(prefetch_shutdown);
 #endif

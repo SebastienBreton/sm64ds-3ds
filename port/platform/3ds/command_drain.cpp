@@ -56,7 +56,9 @@ Pass passes[MaxPasses];unsigned pass_count=0;bool drew=false,sampling=false;
 int list_first[MaxPasses],list_last[MaxPasses];unsigned covered=0;
 volatile unsigned lists_submitted=0,lists_done=0;volatile uint64_t done_tick[MaxPasses];uint64_t run_tick=0;
 unsigned frames=0;uint64_t sampled=0;bool callback_set=false;
-bool enabled(){static const bool b=[](){const char* s=std::getenv("SM64DS_GPU_PASS_TIMING");return !(s&&s[0]=='0');}();return b;}
+// Off by default: on the New 3DS, builds with it (and the enlarged GX queue)
+// froze in heavy scenes (diag m3, 2026-10-10). SM64DS_GPU_PASS_TIMING=1 enables it.
+bool enabled(){static const bool b=[](){const char* s=std::getenv("SM64DS_GPU_PASS_TIMING");return s&&s[0]=='1';}();return b;}
 void on_p3d(void*){
     const unsigned done=lists_done;
     if(done<lists_submitted && done<MaxPasses){done_tick[done]=svcGetSystemTick();lists_done=done+1;}
@@ -131,7 +133,9 @@ extern "C" Result __wrap_GX_ProcessCommandList(u32* buffer,u32 size,u8 flags){gp
 // bound queue is enlarged once, while empty. SM64DS_GX_QUEUE_ENTRIES overrides.
 static u16 queue_peak=0;
 static void enlarge_queue(gxCmdQueue_s* q){
-    static const unsigned want=[](){const char* s=std::getenv("SM64DS_GX_QUEUE_ENTRIES");const unsigned v=s?unsigned(std::atoi(s)):256u;return v<32?32u:v>4096?4096u:v;}();
+    // Stock citro3d queue by default (the enlarged queue was part of the
+    // hardware freeze bisected in diag m3); SM64DS_GX_QUEUE_ENTRIES=N enlarges.
+    static const unsigned want=[](){const char* s=std::getenv("SM64DS_GX_QUEUE_ENTRIES");const unsigned v=s?unsigned(std::atoi(s)):0u;return v>4096?4096u:v;}();
     if(!q || q->maxEntries>=want || q->numEntries)return;
     auto* entries=static_cast<gxCmdEntry_s*>(std::malloc(sizeof(gxCmdEntry_s)*want));
     if(!entries)return;
@@ -139,7 +143,9 @@ static void enlarge_queue(gxCmdQueue_s* q){
     std::printf("GX command queue enlarged to %u entries\n",want);
 }
 extern "C" void __wrap_GX_BindQueue(gxCmdQueue_s* q){enlarge_queue(q);queue=q;__real_GX_BindQueue(q);}
+extern "C" { extern volatile int sm64ds_shadow_probe_pending; void sm64ds_shadow_probe_readback(); }
 extern "C" bool __wrap_C3D_FrameBegin(u8 flags){
+ if(sm64ds_shadow_probe_pending)sm64ds_shadow_probe_readback(); // outside any frame
  const bool ok=__real_C3D_FrameBegin(flags);
  if(ok)gpu_passes::frame_begin();
  if(ok){

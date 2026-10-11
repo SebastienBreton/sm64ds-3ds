@@ -43,8 +43,7 @@ Work in progress. Tested mainly in Azahar (Old 3DS model) and on a New 3DS.
 Known issues and ongoing work are tracked in the GitHub issues. Highlights:
 
 - New 3DS recommended. Menu ~40–60 fps, castle/courses ~30 fps on hardware (optimisation ongoing)
-- Some translucency effects (shadows, translucent boxes) are wrong on real hardware
-- Stereoscopic 3D, OPTIONS and C-Stick camera are validated in Azahar, not yet on hardware
+- Runs on a real New 3DS (menus, intro, castle, courses, bosses); stereo 3D, OPTIONS and C-Stick camera mostly validated in Azahar
 
 ## 🎮 Controls and settings
 

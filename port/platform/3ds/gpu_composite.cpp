@@ -52,11 +52,7 @@ bool Composite::init(const uint32_t* shader,unsigned bytes){
         std::memcpy(vertices_+variant*6,quad,sizeof(quad));
     }
     GSPGPU_FlushDataCache(vertices_,sizeof(Vertex)*6*4);
-    // Hardware experiment SM64DS_COMPOSITE_VRAM=1: the CPU-written composite
-    // inputs live in VRAM (the GPU samples FCRAM textures much more slowly).
-    auto plane=[](C3D_Tex* t){static const bool vram=[](){const char* v=std::getenv("SM64DS_COMPOSITE_VRAM");return v&&v[0]=='1';}();
-        return (vram && C3D_TexInitVRAM(t,256,256,GPU_RGBA8)) || C3D_TexInit(t,256,256,GPU_RGBA8);};
-    if(!plane(&front_) || !plane(&mask_))return false;
+    if(!C3D_TexInit(&front_,256,256,GPU_RGBA8) || !C3D_TexInit(&mask_,256,256,GPU_RGBA8))return false;
     for(auto* texture:{&front_,&mask_}){
         C3D_TexSetFilter(texture,GPU_NEAREST,GPU_NEAREST);
         C3D_TexSetWrap(texture,GPU_CLAMP_TO_EDGE,GPU_CLAMP_TO_EDGE);
@@ -619,8 +615,7 @@ bool Composite::obj_first(Surface& output,ntr::PpuPreparedCandidates candidates,
     Surface* scratch=nullptr;
     if(!semi_surfaces(scratch))return false;
     if(!back_.data){
-        {static const bool vram=[](){const char* v=std::getenv("SM64DS_COMPOSITE_VRAM");return v&&v[0]=='1';}();
-         if(!((vram && C3D_TexInitVRAM(&back_,256,256,GPU_RGBA8)) || C3D_TexInit(&back_,256,256,GPU_RGBA8)))return false;}
+        if(!C3D_TexInit(&back_,256,256,GPU_RGBA8))return false;
         C3D_TexSetFilter(&back_,GPU_NEAREST,GPU_NEAREST);C3D_TexSetWrap(&back_,GPU_CLAMP_TO_EDGE,GPU_CLAMP_TO_EDGE);
     }
     const uint8_t* fl=candidates.front_layer();const uint8_t* fp=candidates.front_priority();
