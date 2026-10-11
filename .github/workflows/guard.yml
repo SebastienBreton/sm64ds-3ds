@@ -19,7 +19,7 @@ jobs:
         run: |
           set -e
           files=$(git ls-files -s | awk '$1 != "160000" {print $4}')
-          bad=$(printf '%s\n' "$files" | grep -Ei '\.(nds|sav|bin|bmp|3dsx|cia|elf|narc|sdat|bmd|btx|bca|nsbmd|nsbtx)$|(^|/)baserom|(^|/)extracted/|(^|/)build3ds/(validation|user-build|cmake)/' || true)
+          bad=$(printf '%s\n' "$files" | grep -Ei '\.(nds|sav|bin|bmp|3dsx|cia|elf|narc|sdat|bmd|btx|bca|nsbmd|nsbtx|smdh|bnr|cwav)$|(^|/)baserom|(^|/)extracted/|(^|/)build3ds/(validation|user-build|cmake|cia-build|tools-bin|tools-src)/' || true)
           if [ -n "$bad" ]; then echo "::error::Game data or binaries must not be committed:"; echo "$bad"; exit 1; fi
           big=$(printf '%s\n' "$files" | while read -r f; do [ -f "$f" ] && [ "$(wc -c < "$f")" -gt 2097152 ] && echo "$f"; done || true)
           if [ -n "$big" ]; then echo "::error::Files larger than 2 MB (likely generated or ROM-derived):"; echo "$big"; exit 1; fi

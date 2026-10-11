@@ -2,7 +2,7 @@
 
 <p>
   <img src="https://img.shields.io/badge/platform-Nintendo%203DS-1f6feb?style=for-the-badge" alt="Nintendo 3DS">
-  <img src="https://img.shields.io/badge/output-.3dsx-6f42c1?style=for-the-badge" alt="3DSX">
+  <img src="https://img.shields.io/badge/output-.3dsx%20%7C%20.cia-6f42c1?style=for-the-badge" alt="3DSX | CIA">
   <img src="https://img.shields.io/badge/status-work%20in%20progress-orange?style=for-the-badge" alt="Work in progress">
 </p>
 
@@ -95,14 +95,41 @@ out/sd/sm64ds/repo/extracted/dsd/{files,archives}/   # game data extracted from 
 Copy the contents of `out/sd/` to the root of your SD card and launch **sm64ds** from the
 Homebrew Launcher. Saves go to `sdmc:/sm64ds/user-test.sav`, logs to `sdmc:/sm64ds/user-test.log`.
 
+### 📦 Installable CIA (HOME Menu icon and banner)
+
+```sh
+./build.sh tools   # once: builds makerom + bannertool from source into build3ds/tools-bin
+./build.sh cia     # -> out/sm64ds.cia (runs the full build first if it was never built)
+```
+
+Extra requirements: `pip install pillow numpy` (on top of the Python packages above), git, make and a
+C/C++ compiler for `./build.sh tools` (Xcode command line tools on macOS, `build-essential` on Linux).
+makerom ([3DSGuy/Project_CTR](https://github.com/3DSGuy/Project_CTR)) and bannertool
+([diasurgical/bannertool](https://github.com/diasurgical/bannertool)) already on your `PATH` are used as is.
+
+- The HOME Menu **banner** shows the game's title-screen logo over a blue sky and the **icon** is the
+  DS cartridge icon. Both are generated at build time **from your own dump** (`build3ds/make_cia_assets.py`)
+  into the git-ignored `build3ds/cia-build/`; no Nintendo artwork is stored in this repository.
+  If the logo can't be found (other ROM revision), a plain text banner is generated instead.
+- Install `out/sm64ds.cia` with [FBI](https://github.com/lifehackerhansol/FBI) (or any CIA installer)
+  on a console running custom firmware. The title appears on the HOME Menu as *Super Mario 64 DS*
+  (title ID `000400000F536400`).
+- The CIA contains only the program: **the game data must still be on the SD card**
+  (`sdmc:/sm64ds/repo/`, from `out/sd/`), exactly like the `.3dsx`. Saves, logs and
+  `settings.ini` stay in `sdmc:/sm64ds/`, shared with the `.3dsx`. Audio needs `sdmc:/3ds/dspfirm.cdc`
+  (dump it once with [DSP1](https://github.com/zoogie/DSP1), as for any homebrew).
+- Memory/CPU: New 3DS 124 MB mode at 804 MHz with L2 cache; Old 3DS 96 MB mode (the default 64 MB
+  is too small for the game). New 3DS recommended; the Old 3DS CIA is untested on hardware.
+
 ## 🗂️ Repository layout
 
 ```
 port/            the 3DS port: platform layer (platform/3ds), DS hardware reimplementation (ntr/),
                  HAL seams (hal/), menus, audio, generators (tools/) and the CMake build
 sm64ds-decomp/   git submodule: the decompilation (fork branch 3ds-port), built from source
-build3ds/        build helpers (build.sh, build_game.py, ROM-free audits)
-build.sh         end-to-end build: extract -> configure -> build -> out/sd
+build3ds/        build helpers (build.sh, build_game.py, CIA packaging: build_cia.py, make_cia_assets.py,
+                 build_cia_tools.sh, cia/sm64ds.rsf; ROM-free audits)
+build.sh         end-to-end build: extract -> configure -> build -> out/sd  (+ `cia`, `tools`)
 ```
 
 `port/CMakeLists.txt` finds the decomp through the cache variable `SM64DS_DECOMP_DIR`
@@ -121,4 +148,5 @@ changes to the decompilation sources (`sm64ds-decomp/src`, `include`, …) → p
 ## ⚖️ Legal
 
 This project contains no Nintendo code or assets and is not affiliated with or endorsed by
-Nintendo. *Super Mario 64 DS* is a trademark of Nintendo. See [LICENSE](LICENSE).
+Nintendo. The CIA banner and icon are extracted from your own dump at build time and must not be
+redistributed. *Super Mario 64 DS* is a trademark of Nintendo. See [LICENSE](LICENSE).

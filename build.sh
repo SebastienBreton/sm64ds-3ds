@@ -3,10 +3,14 @@
 #
 #   ./build.sh            full pipeline (extract -> configure -> build -> SD package)
 #   ./build.sh package    only refresh out/sd from an existing build
+#   ./build.sh cia        installable out/sm64ds.cia (runs the full build first if needed)
+#   ./build.sh tools      build makerom + bannertool from source into build3ds/tools-bin
 #
 # Requires: devkitPro (devkitARM, libctru, citro3d, picasso), CMake >= 3.16,
 # Python >= 3.10 with `pip install ndspy capstone pyelftools`, and the
 # sm64ds-decomp submodule (`git submodule update --init`).
+# The CIA also needs `pip install pillow numpy`, makerom and bannertool (PATH or
+# build3ds/tools-bin, see `./build.sh tools`).
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")" && pwd)"
@@ -86,8 +90,31 @@ package() {
     echo "SD card layout ready in $OUT — copy its contents to the root of your SD card."
 }
 
+check_cia_tools() {
+    local t
+    for t in makerom bannertool; do
+        command -v "$t" > /dev/null || [ -x "$ROOT/build3ds/tools-bin/$t" ] ||
+            die "$t not found. Run ./build.sh tools (builds makerom and bannertool from source into build3ds/tools-bin) or put it on PATH."
+    done
+    "$PYTHON" -c "import PIL, numpy, ndspy" 2> /dev/null ||
+        die "the CIA banner needs Pillow and numpy: $PYTHON -m pip install pillow numpy ndspy"
+}
+
+cia() {
+    # Banner (title logo) and icon are generated from YOUR ROM, never stored in the repo.
+    "$PYTHON" "$ROOT/build3ds/build_cia.py" --rom "$ROM" --elf "$ROOT/build3ds/user-build/sm64ds.elf" \
+        --output "$ROOT/out/sm64ds.cia"
+}
+
 case "${1:-all}" in
     package) package ;;
     all) check_tools; check_rom; extract; configure; compile; package ;;
-    *) echo "usage: $0 [all|package]" >&2; exit 2 ;;
+    tools) "$ROOT/build3ds/build_cia_tools.sh" ;;
+    cia)
+        check_cia_tools; check_rom
+        if [ ! -f "$ROOT/build3ds/user-build/sm64ds.elf" ]; then
+            check_tools; extract; configure; compile; package
+        fi
+        cia ;;
+    *) echo "usage: $0 [all|package|cia|tools]" >&2; exit 2 ;;
 esac

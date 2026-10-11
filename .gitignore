@@ -20,6 +20,12 @@ build3ds/game/
 build3ds/menu-compile/
 build3ds/releases/
 build3ds/validation/
+# CIA: tools built from source, banner/icon generated from YOUR ROM (Nintendo artwork)
+build3ds/tools-src/
+build3ds/tools-bin/
+build3ds/cia-build/
+*.bnr
+*.cwav
 *.3dsx
 *.cia
 *.elf
