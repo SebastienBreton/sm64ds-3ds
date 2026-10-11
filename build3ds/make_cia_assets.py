@@ -5,8 +5,9 @@ The title-screen logo and the DS icon are Nintendo artwork: they are never
 stored in this repository. This script reads them from the user's own
 Super Mario 64 DS (Europe) dump and writes, into a git-ignored directory:
 
-  banner.png   256x128  title logo (1:1, as on the DS top screen) over a
-                        generated sky gradient -> bannertool makebanner
+  banner.png   256x128  title logo (1:1, as on the DS top screen) on a
+                        transparent background (--sky: over a generated sky
+                        gradient)          -> bannertool makebanner
   icon.png     48x48    the DS cartridge icon (32x32) upscaled (Scale3x then
                         2x2 area average)          -> bannertool makesmdh
   banner.wav   short silent clip (bannertool needs a banner sound)
@@ -22,7 +23,7 @@ with ndspy (BLZ-decompressed). Both blocks are checked against SHA-1 digests
 of the Europe ROM before use; on any mismatch (other region/revision) the
 script falls back to a generated text banner containing no Nintendo artwork.
 
-Usage: make_cia_assets.py --rom ROM --out DIR [--fallback]
+Usage: make_cia_assets.py --rom ROM --out DIR [--fallback] [--sky]
 """
 import argparse
 import hashlib
@@ -111,8 +112,8 @@ def text_logo():
     return img
 
 
-def make_banner(logo):
-    banner = sky(BANNER_W, BANNER_H)
+def make_banner(logo, with_sky=False):
+    banner = sky(BANNER_W, BANNER_H) if with_sky else Image.new("RGBA", (BANNER_W, BANNER_H), (0, 0, 0, 0))
     x = (BANNER_W - logo.width) // 2
     y = (BANNER_H - logo.height) // 2
     banner.alpha_composite(logo, (x, y))
@@ -205,6 +206,7 @@ def main():
     ap.add_argument("--rom", required=True, type=Path)
     ap.add_argument("--out", required=True, type=Path)
     ap.add_argument("--fallback", action="store_true", help="force the generated text banner (no ROM artwork)")
+    ap.add_argument("--sky", action="store_true", help="put the logo over a generated sky instead of a transparent background")
     a = ap.parse_args()
     a.out.mkdir(parents=True, exist_ok=True)
     rom = ndspy.rom.NintendoDSRom.fromFile(str(a.rom))
@@ -222,7 +224,8 @@ def main():
         logo = text_logo()
         info["logo_source"] = "generated text fallback (no Nintendo artwork)"
 
-    banner = make_banner(logo)
+    banner = make_banner(logo, a.sky)
+    info["background"] = "sky" if a.sky else "transparent"
     banner.save(a.out / "banner.png")
     icon, info["icon_source"] = make_icon(rom, logo)
     icon.save(a.out / "icon.png")
