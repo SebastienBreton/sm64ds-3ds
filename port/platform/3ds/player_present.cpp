@@ -592,7 +592,10 @@ bool player_present_pipeline_enable(bool (*audio)(),bool asynchronous_audio){
     int core=1;
     if(const char* c=std::getenv("SM64DS_PIPELINE_CORE"))core=std::atoi(c);
     if(core==1){
-        const Result limit=APT_SetAppCpuTimeLimit(80);
+        // SM64DS_APP_CPU_LIMIT (default 80): share of core 1 given to the application;
+        // the GSP/system modules also run there (hardware performance experiment).
+        static const unsigned percent=[](){const char* v=std::getenv("SM64DS_APP_CPU_LIMIT");const int n=v?std::atoi(v):80;return unsigned(n<5?5:n>80?80:n);}();
+        const Result limit=APT_SetAppCpuTimeLimit(percent);
         if(R_FAILED(limit))std::printf("Present pipeline: APT_SetAppCpuTimeLimit failed %08lx\n",(unsigned long)limit);
     }
     LightEvent_Init(&go,RESET_ONESHOT);LightEvent_Init(&done,RESET_ONESHOT);

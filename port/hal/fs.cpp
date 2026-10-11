@@ -363,7 +363,10 @@ static void prefetch_start_once(void)
     // limit (Azahar does not enforce this); the presentation pipeline asks
     // for the same 80%.
     unsigned limit = 0;
-    if (APT_GetAppCpuTimeLimit(&limit) >= 0 && limit == 0) APT_SetAppCpuTimeLimit(80);
+    if (APT_GetAppCpuTimeLimit(&limit) >= 0 && limit == 0) {
+        const char *cpu = getenv("SM64DS_APP_CPU_LIMIT"); int n = cpu ? atoi(cpu) : 80; // same default as the pipeline
+        APT_SetAppCpuTimeLimit(unsigned(n < 5 ? 5 : n > 80 ? 80 : n));
+    }
     // 64 KiB: the thread runs newlib fopen/fread/printf and libctru FS IPC;
     // 16 KiB left no margin (hardware freezes right after its log lines; a
     // stack overflow would silently overwrite the neighbouring heap block).
