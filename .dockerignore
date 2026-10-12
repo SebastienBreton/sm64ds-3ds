@@ -1,0 +1,7 @@
+# The image contains only tools. Sources and local game data are mounted at run time.
+**
+!docker/
+!docker/Dockerfile
+!docker/requirements.txt
+!build3ds/
+!build3ds/build_cia_tools.sh

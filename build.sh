@@ -6,7 +6,8 @@
 #   ./build.sh cia        installable out/sm64ds.cia (runs the full build first if needed)
 #   ./build.sh tools      build makerom + bannertool from source into build3ds/tools-bin
 #
-# Requires: devkitPro (devkitARM, libctru, citro3d, picasso), CMake >= 3.16,
+# Docker is the default backend; use ./build.sh --native for the local toolchain.
+# Native requires: devkitPro (devkitARM, libctru, citro3d, picasso), CMake >= 3.16,
 # Python >= 3.10 with `pip install ndspy capstone pyelftools`, and the
 # sm64ds-decomp submodule (`git submodule update --init`).
 # The CIA also needs `pip install pillow numpy`, makerom and bannertool (PATH or
@@ -14,6 +15,25 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")" && pwd)"
+BACKEND="${SM64DS_BUILD_BACKEND:-docker}"
+case "${1:-}" in
+    --native) BACKEND=native; shift ;;
+    --docker) BACKEND=docker; shift ;;
+    --help|-h)
+        echo "usage: $0 [--docker|--native] [all|package|cia|tools]"
+        echo "Docker is the default. Set SM64DS_ROM=/path/to/dump.nds to use an external ROM."
+        exit 0 ;;
+esac
+[ "$#" -le 1 ] || { echo "error: expected one build command" >&2; exit 2; }
+case "${1:-all}" in
+    all|package|cia|tools) ;;
+    *) echo "usage: $0 [--docker|--native] [all|package|cia|tools]" >&2; exit 2 ;;
+esac
+case "$BACKEND" in
+    docker) exec "$ROOT/docker/build.sh" "${1:-all}" ;;
+    native) ;;
+    *) echo "error: SM64DS_BUILD_BACKEND must be docker or native" >&2; exit 2 ;;
+esac
 ROM="${SM64DS_ROM:-$ROOT/baserom.eu.nds}"
 DECOMP="$ROOT/sm64ds-decomp"
 PORT="$ROOT/port"
