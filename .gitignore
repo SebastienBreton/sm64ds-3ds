@@ -15,6 +15,7 @@ out/
 build/
 build3ds/cmake/
 build3ds/cmake-*/
+build3ds/docker/
 build3ds/user-build/
 build3ds/game/
 build3ds/menu-compile/

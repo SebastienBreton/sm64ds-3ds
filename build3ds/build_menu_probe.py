@@ -2,6 +2,7 @@
 """Link menu probes in their own directory, reading existing production objects."""
 from pathlib import Path
 import argparse,json,re,shlex,subprocess
+from cmake_link import expand_response_files
 root=Path(__file__).resolve().parent.parent;shared=root/'build3ds/cmake';out=root/'build3ds/menu-compile'
 p=argparse.ArgumentParser();p.add_argument('source',type=Path);p.add_argument('--wrap',action='append',default=[]);p.add_argument('--extra-object',action='append',type=Path,default=[]);p.add_argument('--omit-object',action='append',default=[])
 p.add_argument('--replace-link-input',action='append',default=[],metavar='OLD=NEW',help='Replace an exact object/archive input with an isolated candidate; OLD is relative to shared CMake directory')
@@ -13,7 +14,7 @@ for key in ['CXX_DEFINES','CXX_INCLUDES','CXX_FLAGS']:
 obj=out/(name+'.o');elf=out/(name+'.elf');binary=out/(name+'.3dsx')
 for path in [obj,elf,binary]:path.unlink(missing_ok=True)
 subprocess.run(['/opt/devkitpro/devkitARM/bin/arm-none-eabi-g++',*args,'-c',str(source),'-o',str(obj)],check=True)
-command=shlex.split((shared/'CMakeFiles/smoke_player.dir/link.txt').read_text())
+command=expand_response_files(shlex.split((shared/'CMakeFiles/smoke_player.dir/link.txt').read_text()),shared)
 for omitted in a.omit_object:
     assert omitted.endswith('.o') and command.count(omitted)==1, omitted
     command.remove(omitted)

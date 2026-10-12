@@ -59,12 +59,10 @@ camera_cstick = ds      ; or: free / off
 
 ## 🏗️ Building
 
-Requirements:
+Docker is the default build backend. Requirements:
 
-- [devkitPro](https://devkitpro.org/wiki/Getting_Started) with devkitARM, `3ds-dev` (libctru, citro3d, picasso)
-  (expected in `/opt/devkitpro`, the default install location)
-- CMake ≥ 3.16, Python ≥ 3.10, `pip install ndspy capstone pyelftools`
-  (a virtualenv is fine: activate it, or run `PYTHON=/path/to/venv/bin/python ./build.sh`)
+- Docker Engine on Linux, Docker Desktop / OrbStack on macOS, or Docker Desktop with WSL 2 on Windows
+- Git, with the `sm64ds-decomp` submodule initialized
 - Your own dump of **Super Mario 64 DS (Europe) (En,Fr,De,Es,It)**,
   SHA-1 `1367529f2cb23e76ef295cb1727333ae8f0a6cd7`
 
@@ -79,6 +77,39 @@ cp /path/to/your/dump.nds baserom.eu.nds
 
 Already cloned without `--recursive`, or pulled a change that moves the submodule?
 Run `git submodule update --init --recursive`.
+
+Start your Docker engine before building. The main commands are:
+
+| Command | Result |
+|---|---|
+| `./build.sh` | Extract the ROM, compile the game and prepare `out/sd/` |
+| `./build.sh cia` | Create `out/sm64ds.cia`, building the game first if needed |
+| `./build.sh package` | Refresh `out/sd/` from the existing Docker build |
+| `./build.sh --native` | Run the full pipeline with your local devkitPro/Python installation |
+| `./build.sh --help` | Show available commands and backend options |
+
+The first run builds a local toolchain image from the official
+[devkitPro Docker image](https://github.com/devkitPro/docker), pinned by digest, with the Python
+dependencies and CIA packaging tools. Later runs reuse it; changes to the image recipe rebuild it
+automatically. Both Intel/AMD and Apple Silicon hosts are supported without forcing x86 emulation.
+Only tool files enter the image: your ROM is mounted read-only at run time.
+
+To use a dump outside the checkout (paths with spaces are supported):
+
+```sh
+SM64DS_ROM="/path/to/your/dump.nds" ./build.sh
+```
+
+Linux build caches and intermediate binaries live in the ignored `build3ds/docker/` directory,
+separately from native builds. Final files stay in `out/`. Use `JOBS=4 ./build.sh` to limit build
+parallelism. The Docker `.elf` and `.3dsx` intermediates are in `build3ds/docker/user-build/`;
+the native equivalents are in `build3ds/user-build/`. Both backends write the same final `out/` paths.
+
+For a local build, use `./build.sh --native` (or set `SM64DS_BUILD_BACKEND=native`). This requires
+[devkitPro](https://devkitpro.org/wiki/Getting_Started) with devkitARM and `3ds-dev` in `/opt/devkitpro`,
+CMake ≥ 3.16, and Python ≥ 3.10 with `pip install ndspy capstone pyelftools`.
+A virtualenv works: `PYTHON=/path/to/venv/bin/python ./build.sh --native`.
+The same commands are available with either backend: `all`, `package`, `cia`, and `tools`.
 
 No dsd toolkit and no Metrowerks compiler are needed: the port builds the decomp sources with
 devkitARM GCC, and the ROM is unpacked with `ndspy`.
@@ -98,18 +129,20 @@ Homebrew Launcher. Saves go to `sdmc:/sm64ds/user-test.sav`, logs to `sdmc:/sm64
 ### 📦 Installable CIA (HOME Menu icon and banner)
 
 ```sh
-./build.sh tools   # once: builds makerom + bannertool from source into build3ds/tools-bin
 ./build.sh cia     # -> out/sm64ds.cia (runs the full build first if it was never built)
 ```
 
-Extra requirements: `pip install pillow numpy` (on top of the Python packages above), git, make and a
-C/C++ compiler for `./build.sh tools` (Xcode command line tools on macOS, `build-essential` on Linux).
+Docker already includes Pillow, numpy, makerom and bannertool. For native CIA builds, install
+`pip install pillow numpy`, then run `./build.sh --native tools` once to build the tools
+(requires git, make and a C/C++ compiler: Xcode command line tools on macOS, `build-essential` on Linux).
+Then use `./build.sh --native cia`. Native tools already on your `PATH` are used as is.
 makerom ([3DSGuy/Project_CTR](https://github.com/3DSGuy/Project_CTR)) and bannertool
-([diasurgical/bannertool](https://github.com/diasurgical/bannertool)) already on your `PATH` are used as is.
+([diasurgical/bannertool](https://github.com/diasurgical/bannertool)) are built at pinned commits.
 
 - The HOME Menu **banner** shows the game's title-screen logo over a blue sky and the **icon** is the
   DS cartridge icon. Both are generated at build time **from your own dump** (`build3ds/make_cia_assets.py`)
-  into the git-ignored `build3ds/cia-build/`; no Nintendo artwork is stored in this repository.
+  into the git-ignored `build3ds/docker/cia-build/` (`build3ds/cia-build/` for native builds);
+  no Nintendo artwork is stored in this repository.
   If the logo can't be found (other ROM revision), a plain text banner is generated instead.
 - Install `out/sm64ds.cia` with [FBI](https://github.com/lifehackerhansol/FBI) (or any CIA installer)
   on a console running custom firmware. The title appears on the HOME Menu as *Super Mario 64 DS*
@@ -129,7 +162,8 @@ port/            the 3DS port: platform layer (platform/3ds), DS hardware reimpl
 sm64ds-decomp/   git submodule: the decompilation (fork branch 3ds-port), built from source
 build3ds/        build helpers (build.sh, build_game.py, CIA packaging: build_cia.py, make_cia_assets.py,
                  build_cia_tools.sh, cia/sm64ds.rsf; ROM-free audits)
-build.sh         end-to-end build: extract -> configure -> build -> out/sd  (+ `cia`, `tools`)
+build.sh         end-to-end build via Docker by default; --native uses local tools
+docker/          toolchain image, pinned Python dependencies and Docker runner
 ```
 
 `port/CMakeLists.txt` finds the decomp through the cache variable `SM64DS_DECOMP_DIR`

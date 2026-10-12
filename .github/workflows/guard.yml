@@ -30,3 +30,5 @@ jobs:
           git ls-files -s sm64ds-decomp | grep -q '^160000 '
       - name: Python syntax
         run: python3 -m compileall -q build3ds port/tools > /dev/null
+      - name: Build backend and Docker mounts
+        run: python3 -m unittest discover -s docker -p 'test_*.py'

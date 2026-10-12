@@ -66,7 +66,7 @@ def prepare(root, stage, compiler):
         source=stage/Path(request['source']).with_suffix('.cpp')
         obj=out/(source.stem+'.ownership.o');log=out/(source.stem+'.ownership.log')
         command=[compiler,*flags,'-c',str(source),'-o',str(obj)]
-        with log.open('w') as stream:result=subprocess.run(['rtk','proxy',*command],stdout=stream,stderr=subprocess.STDOUT)
+        with log.open('w') as stream:result=subprocess.run(command,stdout=stream,stderr=subprocess.STDOUT)
         if result.returncode:raise ValueError('Ownership precompile failed: '+str(log))
         proof=initialized_data_owner.prove(root,audit,obj,request['symbols'])
         text=source.read_text();candidate=initialized_data_owner.extern_definitions(text,request['symbols'])

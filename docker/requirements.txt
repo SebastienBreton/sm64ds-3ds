@@ -1,0 +1,6 @@
+ndspy==4.2.0
+capstone==5.0.9
+pyelftools==0.33
+Pillow==12.3.0
+# Last series supporting the toolchain image's Python 3.11.
+numpy==2.4.6
